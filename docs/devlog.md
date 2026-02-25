@@ -49,3 +49,29 @@ It’s important to clarify that our deployment explicitly isolates the base orc
 
 ## Conclusion
 The `ray-cluster-b200-nemo.yaml` deployed is now deterministic, lightweight, heavily annotated for distributed networking via `rdma`, and fortified against dependency regressions. The `sleep infinity` debugging methodology proved invaluable in peeling back the layers from KubeRay obfuscation down to the raw Python exception.
+
+## Architectural Q&A Appendix
+
+### 1. Why `pip` in the YAML but `uv` in the RL scripts?
+NVIDIA's `nemo:24.07` base image is a massive, highly stable foundation (PyTorch, Megatron-Core, CUDA) built using standard `pip`. Conversely, the rapidly evolving `NVIDIA-NeMo/RL` subset standardizes on `uv` for lightning-fast dependency resolution. We use standard `pip` in the `initContainer` simply to fetch `ray` and `click`, while explicitly using `uv` later strictly for the NeMo-RL compilation to guarantee maximum speed for the heavy frameworks.
+
+### 2. Why isn't NeMo-RL deployed into GCS `/data`?
+GCS Fuse is a network-mounted drive. Running `git clone` or `uv pip install` inside it would cause catastrophic I/O bottlenecks and compilation timeouts across thousands of tiny files. Thus, the NeMo-RL framework is compiled locally onto the node's blistering-fast SSD (`/workspace` or `/tmp`). The GCS `/data` mount is kept entirely empty during boot so it can be strictly reserved for housing massive, streaming Parquet datasets and writing final 10GB+ Model Checkpoints during active training runs.
+
+### 3. Why decouple vLLM/NeMo-RL into `setup_nemo_rl.sh` instead of the YAML?
+This adheres to strict Separation of Concerns. 
+* **The YAML (Infrastructure):** provisions the pure compute engine (GPUs, Memory, Ray daemon). Bypassing heavy software builds in the `initContainer` guarantees pods spin up instantaneously and remain framework-agnostic.
+* **The Script (Payload):** `setup_nemo_rl.sh` dynamically layers the heavy NeMo-RL/vLLM software specifically onto our cluster. By avoiding YAML-level hardcoding, we can instantly update Python logic or train completely different models on the exact same cluster without having to tear down the Kubernetes infrastructure.
+
+### 4. Migration Guide: `b200.yaml` -> `b200-nemo.yaml`
+The evolution from the original VERL-based manifest to the robust NeMo-RL manifest required several major architectural transformations:
+
+* **Base Image Update:** Swapped `verlai/verl:vllm011.latest` for the NVIDIA-official `nvcr.io/nvidia/nemo:24.07` container across all pods to guarantee deep compatibility with PyTorch 2.3, Megatron-Core, and CUDA 12.4 natively.
+* **Ray Version Downgrade:** Reverted KubeRay's target `rayVersion` from `2.48.0` back to `2.33.0`. NeMo 24.07 has stricter Ray compatibilities, and 2.33.0 prevents advanced orchestrator deprecation conflicts.
+* **InitContainer Re-architecture:**
+  * *Original:* Attempted to `pip install -e .` the framework directly from the GCS Fuse `/data` mount, causing massive network I/O timeouts.
+  * *New:* Replaced with an `install-ray` step that strictly installs `ray` and a patched `click==8.1.3` (to fix a Python 3.10 deepcopy bug) into a blistering fast, ephemeral local volume (`emptyDir: /tmp/ray/packages`).
+* **KubeRay Command Injection Proxy:** 
+  * *Original:* The VERL worker arbitrarily set `command: ["source..."]`, which catastrophically overrode KubeRay's ability to inject the actual `ray start` command, causing pods to hang.
+  * *New:* Implemented a native bash proxy: `command: ["/bin/bash", "-c", "export PATH...; eval \"$*\""]`. This intercepts KubeRay's dynamically generated `$*` start commands and safely executes them *after* we source our custom environments.
+* **NCCL Networking & Storage Optimization:** Explicitly surfaced 15+ highly tuned `NCCL_*` environment variables (e.g., `NCCL_ALGO=Ring,Tree`, `NCCL_CROSS_NIC=1`) on the workers to maximize B200 RDMA throughput. Cleaned up legacy `hostPath` volumes (`lib64`, `sys`, `proc-sys`) that were unmounted and contributing to manifest bloat.

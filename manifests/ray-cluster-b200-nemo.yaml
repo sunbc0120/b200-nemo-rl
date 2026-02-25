@@ -7,24 +7,42 @@ spec:
   enableInTreeAutoscaling: true
   autoscalerOptions:
     idleTimeoutSeconds: 7200
-  rayVersion: '2.33.0'
+    image: rayproject/ray:2.33.0
+  rayVersion: '2.33.0' # Matches likely version in NeMo container or close to it
   headGroupSpec:
     rayStartParams:
-      dashboard-host: 0.0.0.0
+      # ulimit is handled by the container runtime automatically now
+      dashboard-host: '0.0.0.0'
+      num-cpus: '12'
     template:
       metadata:
         annotations:
-          gke-gcsfuse/volumes: "false"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/volumes: "true"
       spec:
         serviceAccountName: "ikwak-ray-tf"
         restartPolicy: Never
         terminationGracePeriodSeconds: 300
+        initContainers:
+        - name: install-ray
+          image: nvcr.io/nvidia/nemo:24.07
+          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"click==8.1.3\" \"ray[default]==2.33.0\""]
+          volumeMounts:
+          - mountPath: /tmp/ray
+            name: ray-logs
         nodeSelector:
           cloud.google.com/gke-nodepool: "default-pool"
         containers:
         - name: ray-head
+          # Using NVIDIA NeMo 24.07 container as discussed
           image: nvcr.io/nvidia/nemo:24.07
           env:
+          - name: PYTHONPATH
+            value: "/tmp/ray/packages"
+          - name: PATH
+            value: "/tmp/ray/packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           - name: RAY_enable_autoscaler_v2
             value: "1"
           - name: ORCHESTRATOR
@@ -48,27 +66,28 @@ spec:
           volumeMounts:
             - mountPath: /tmp/ray
               name: ray-logs
-            # - name: gcs-fuse-csi-eph
-            #   mountPath: /data
-          command: ["/bin/bash", "-c", "pip install \"ray[default]==2.33.0\" && ray start --head --port=6379 --num-cpus=12 --dashboard-host=0.0.0.0 --dashboard-agent-listen-port=52365 --block"]
+            - name: gcs-fuse-csi-eph
+              mountPath: /data
+          command: ["/bin/bash", "-c", "export PATH=/tmp/ray/packages/bin:$PATH; eval \"$*\""]
         volumes:
           - name: ray-logs
             emptyDir: {}
-          # - csi:
-          #     driver: gcsfuse.csi.storage.gke.io
-          #     volumeAttributes:
-          #       bucketName: ikwak-ray-tf
-          #       gcsfuseMetadataPrefetchOnMount: "true"
-          #       mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
-          #   name: gcs-fuse-csi-eph
+          - csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: ikwak-ray-tf
+                gcsfuseMetadataPrefetchOnMount: "true"
+                mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
+            name: gcs-fuse-csi-eph
   workerGroupSpecs:
   - replicas: 1 # Start with 1 node for testing
     minReplicas: 1
     maxReplicas: 4
     groupName: gpu-group
     rayStartParams:
-      num-cpus: "220"
-      resources: '"{\"accelerator_type:B200\": 8}"'
+      num-cpus: '220'
+      # resources are dynamically configured via annotations or defaults
+      # "{\"accelerator_type:B200\": 8}"'
     template:
       metadata:
         annotations:
@@ -88,27 +107,17 @@ spec:
           gke-gcsfuse/cpu-limit: "0"
           gke-gcsfuse/ephemeral-storage-limit: "0"
           gke-gcsfuse/memory-limit: "0"
-          gke-gcsfuse/volumes: "false"
+          gke-gcsfuse/volumes: "true"
       spec:
         serviceAccountName: "ikwak-ray-tf"
         restartPolicy: Never
-        terminationGracePeriodSeconds: 300
-        # initContainers:
-        # # We need git to clone the repo if it's not in the image or mounted.
-        # # But NeMo image has git. We can do setup in the main container or separate init.
-        # # Let's use a simple init to ensure permissions if needed.
-        # - name: prep-workdir
-        #   image: nvcr.io/nvidia/nemo:24.07
-        #   command: ["/bin/bash", "-c"]
-        #   args:
-        #     - |
-        #       echo "Preparing workdir..."
-        #       mkdir -p /data/nemo-rl-runs || echo "Failed to mkdir"
-        #       echo "Sleep for debug..."
-        #       sleep 30
-        #   volumeMounts:
-        #   - name: gcs-fuse-csi-eph
-        #     mountPath: /data
+        initContainers:
+        - name: install-ray
+          image: nvcr.io/nvidia/nemo:24.07
+          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"click==8.1.3\" \"ray[default]==2.33.0\""]
+          volumeMounts:
+          - mountPath: /tmp
+            name: ray-tmp-storage
         nodeSelector:
           cloud.google.com/gke-nodepool: "b200-spot-ccc"
         tolerations:
@@ -123,6 +132,10 @@ spec:
         - name: ray-worker
           image: nvcr.io/nvidia/nemo:24.07
           env:
+           - name: PYTHONPATH
+             value: "/tmp/ray/packages"
+           - name: PATH
+             value: "/tmp/ray/packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
            - name: LD_LIBRARY_PATH
              value: /usr/local/nvidia/lib64:/usr/local/gib/lib64
            - name: NCCL_CROSS_NIC
@@ -150,13 +163,7 @@ spec:
            # Force vLLM V1 as per gemma3_model_quirk.md
            - name: NRL_VLLM_USE_V1
              value: "1"
-          # command: ["/bin/bash", "-c"]
-          # args:
-          #   - |
-          #     source /usr/local/gib/scripts/set_nccl_env.sh
-          #     # Standard Ray start
-          #     ray start --address=$RAY_HEAD_IP:6379 --object-manager-port=8076 --node-ip-address=$MY_POD_IP --block
-          command: ["/bin/bash", "-c", "pip install \"ray[default]==2.33.0\" && ray start --address=ray-cluster-b200-nemo-head:6379 --num-cpus=220 --num-gpus=8 --block"]
+          command: ["/bin/bash", "-c", "export PATH=/tmp/ray/packages/bin:$PATH; source /usr/local/gib/scripts/set_nccl_env.sh && eval \"$*\""]
           resources:
             limits:
               cpu: "220"
@@ -177,8 +184,8 @@ spec:
             mountPath: /dev/shm
           - name: ray-tmp-storage
             mountPath: /tmp
-          # - name: gcs-fuse-csi-eph
-          #   mountPath: /data
+          - name: gcs-fuse-csi-eph
+            mountPath: /data
         volumes:
         - name: gib
           hostPath:
@@ -201,11 +208,11 @@ spec:
             path: /proc/sys
         - name: ray-tmp-storage
           emptyDir: {}
-        # - name: gcs-fuse-csi-eph
-        #   csi:
-        #     driver: gcsfuse.csi.storage.gke.io
-        #     volumeAttributes:
-        #       bucketName: ikwak-ray-tf
-        #       gcsfuseMetadataPrefetchOnMount: "true"
-        #       mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
-        #   name: gcs-fuse-csi-eph
+        - name: gcs-fuse-csi-eph
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: ikwak-ray-tf
+              gcsfuseMetadataPrefetchOnMount: "true"
+              mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
+          name: gcs-fuse-csi-eph

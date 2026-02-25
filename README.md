@@ -7,6 +7,7 @@ The cluster provisions **B200** Spot instances (8 GPUs per node) and mounts a hi
 ## Prerequisites
 - Authenticated `kubectl` context pointing to your target GKE cluster.
 - The `ray-cluster-b200-nemo.yaml` manifest.
+- A valid HuggingFace Access Token exported into your terminal (`export HF_TOKEN="hf_..."`) to download gated Gemma 3 weights.
 
 ## Deployment Instructions
 
@@ -52,5 +53,20 @@ kubectl exec $HEAD_POD -c ray-head -- /bin/bash -c "export PATH=/tmp/ray/package
 
 If successful, you will see a console output reporting **232 active CPUs** and **16.0 active GPUs** (assuming 2 replicas).
 
-## Next Steps
-Your infrastructure is now fully stabilized and distributed. You may proceed to submit your RL training scripts (e.g., `launch_grpo_gemma3.py`) to the Head node, which will leverage Ray's `runtime_env` to synthesize the codebase across the active workers.
+## 5. Job Execution (GRPO Gemma 3)
+Your infrastructure is now fully stabilized and distributed! You do **not** need a local Python environment or a local Ray installation.
+
+To initiate the training pipeline, we leverage a native bash wrapper (`launch_grpo.sh`) that uses `kubectl exec` to proxy into the Head pod and trigger Ray's native JobSubmissionClient from *inside* the cluster:
+
+```bash
+# Ensure your token is exported locally!
+export HF_TOKEN="your_huggingface_token"
+
+# Execute the launcher
+./scripts/launch_grpo.sh
+```
+
+This script will automatically:
+1. Find your Ray Head Pod.
+2. Inject your `$HF_TOKEN`, `setup_nemo_rl.sh`, and custom `grpo-gemma*.yaml` manifests directly into the Head node's `/workspace`.
+3. Broadcast the codebase to all Workers via `ray job submit` and commence OpenMathInstruct-2 GRPO modeling!

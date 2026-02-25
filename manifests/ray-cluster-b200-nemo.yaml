@@ -41,8 +41,6 @@ spec:
           env:
           - name: PYTHONPATH
             value: "/tmp/ray/packages"
-          - name: PATH
-            value: "/tmp/ray/packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           - name: RAY_enable_autoscaler_v2
             value: "1"
           - name: ORCHESTRATOR
@@ -134,8 +132,6 @@ spec:
           env:
            - name: PYTHONPATH
              value: "/tmp/ray/packages"
-           - name: PATH
-             value: "/tmp/ray/packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
            - name: LD_LIBRARY_PATH
              value: /usr/local/nvidia/lib64:/usr/local/gib/lib64
            - name: NCCL_CROSS_NIC

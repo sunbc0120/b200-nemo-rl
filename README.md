@@ -53,7 +53,16 @@ kubectl exec $HEAD_POD -c ray-head -- /bin/bash -c "export PATH=/tmp/ray/package
 
 If successful, you will see a console output reporting **232 active CPUs** and **16.0 active GPUs** (assuming 2 replicas).
 
-## 5. Job Execution (GRPO Gemma 3)
+## 5. Connect to the Ray Dashboard
+You can monitor the cluster's GPU utilization, view logs, and track the real-time progress of jobs via the Ray Dashboard. Set up a local port-forward to the Ray Head service using `kubectl`:
+
+```bash
+kubectl port-forward svc/ray-cluster-b200-nemo-head-svc 8265:8265
+```
+
+Once that is running, open your web browser and navigate to: **[http://localhost:8265](http://localhost:8265)**
+
+## 6. Job Execution (GRPO Gemma 3)
 Your infrastructure is now fully stabilized and distributed! You do **not** need a local Python environment or a local Ray installation.
 
 To initiate the training pipeline, we leverage a native bash wrapper (`launch_grpo.sh`) that uses `kubectl exec` to proxy into the Head pod and trigger Ray's native JobSubmissionClient from *inside* the cluster:

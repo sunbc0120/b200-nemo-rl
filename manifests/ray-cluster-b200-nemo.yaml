@@ -72,15 +72,15 @@ spec:
         volumes:
           - name: ray-logs
             emptyDir: {}
-          - csi:
+          - name: gcs-fuse-csi-eph
+            csi:
               driver: gcsfuse.csi.storage.gke.io
               volumeAttributes:
                 bucketName: ikwak-ray-tf
                 gcsfuseMetadataPrefetchOnMount: "true"
                 mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
-            name: gcs-fuse-csi-eph
   workerGroupSpecs:
-  - replicas: 1 # Start with 1 node for testing
+  - replicas: 2 # Scaled up for distributed job testing
     minReplicas: 1
     maxReplicas: 4
     groupName: gpu-group
@@ -193,19 +193,10 @@ spec:
         - name: nvidia
           hostPath:
             path: /home/kubernetes/bin/nvidia
-        - name: lib64
-          hostPath:
-            path: /lib64
         - name: shared-memory
           emptyDir:
             medium: "Memory"
             sizeLimit: 250Gi
-        - name: sys
-          hostPath:
-            path: /sys
-        - name: proc-sys
-          hostPath:
-            path: /proc/sys
         - name: ray-tmp-storage
           emptyDir: {}
         - name: gcs-fuse-csi-eph
@@ -215,4 +206,3 @@ spec:
               bucketName: ikwak-ray-tf
               gcsfuseMetadataPrefetchOnMount: "true"
               mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
-          name: gcs-fuse-csi-eph

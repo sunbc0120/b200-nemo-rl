@@ -18,7 +18,7 @@ spec:
       metadata:
         annotations:
           gke-gcsfuse/cpu-limit: "0"
-          gke-gcsfuse/ephemeral-storage-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "30Gi"
           gke-gcsfuse/memory-limit: "0"
           gke-gcsfuse/volumes: "true"
       spec:
@@ -201,4 +201,4 @@ spec:
             volumeAttributes:
               bucketName: ikwak-ray-tf
               gcsfuseMetadataPrefetchOnMount: "true"
-              mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
+              mountOptions: "implicit-dirs,file-mode=777,dir-mode=777,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1"

@@ -61,3 +61,29 @@ They serve completely different, but equally critical, purposes:
 2. **TensorBoard / W&B = Machine Learning Metrics**
    * They tell you **WHAT** the math is doing. Is the Reward actually going up? Is the Policy Mode-Collapsing (KL Divergence exploding)?
    * **The Catch:** These loggers natively track historical data over months. You can overlay the graph from *Experiment #1* (Learning Rate 1e-4) directly on top of *Experiment #2* (Learning Rate 5e-5) to see which one mathematically converges faster. The Ray dashboard cannot compare historical training runs.
+
+## Training Dynamics: The RLHF Alignment Tax (KL Rebound)
+
+During early GRPO training (Steps 1 to 50), it is common to observe sharp accuracy drops that look like catastrophic "crashes" or "overfitting." However, this is usually a mathematically expected behavioral correction triggered by the KL Penalty.
+
+Let's dissect exactly what the graphs are showing around Step 30 to Step 50:
+
+### 1. The KL Penalty "Rubber Band" Snaps
+Look at the `train/kl_penalty` graph. From Step 0 to 30, it rises gently, which allows the model freedom to explore new mathematical reasoning paths. But around Step 35, the KL Penalty accelerates steeply, hitting `~0.09`.
+* **What this means:** The algorithm detected that the model's new behavior was straying *too far* from the original, coherent English of the base Gemma 3 model. The RL framework violently yanks the "leash" to pull the model back to safety.
+
+### 2. The Model Panics and Ramble-Chops
+Look at `train/mean_gen_tokens` and `validation/avg_length`. Right around Step 30, the model's generation length plummets from ~700 tokens down to ~550 tokens.
+* **What this means:** Because the KL Penalty suddenly started hurting its "score," the model panicked. It realized that generating long, elaborate `<think>` chains was accumulating too much KL divergence. Its optimal strategy to avoid the penalty was to simply *stop thinking* and chop its answers short.
+
+### 3. Accuracy Plummets
+Because the model stopped thinking deeply (due to the KL penalty fear), its `validation/accuracy` and `train/reward` naturally crashed from the high 40%s back down below baseline. A model that doesn't think, doesn't solve math.
+
+### The Conclusion -> Are you ruined?
+Absolutely not. This is famously known as the **"RLHF Alignment Tax" or "KL Rebound"**.
+1. The model explores and finds high reward (Steps 1-30).
+2. It drifts too far linguistically, triggering a massive KL penalty (Step 35).
+3. It over-corrects, shortening its thoughts and losing accuracy (Steps 40-50).
+4. **The Next Step:** If you let training continue to Step 100+, the model will eventually learn the *balance*. It will figure out how to maintain the deep mathematical reasoning of Step 30 *without* triggering the linguistic KL penalty of Step 35.
+
+**Recommendation:** Do not use the post-crash `step_50` checkpoint for inference. If you want the smartest short-term model, `step_30` is currently your golden checkpoint before the crash. Otherwise, you need to spin the cluster back up and let it train to `step_150+` so it can stabilize past the KL rebound!

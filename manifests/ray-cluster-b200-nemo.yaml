@@ -7,8 +7,8 @@ spec:
   enableInTreeAutoscaling: true
   autoscalerOptions:
     idleTimeoutSeconds: 7200
-    image: rayproject/ray:2.33.0
-  rayVersion: '2.33.0' # Matches likely version in NeMo container or close to it
+    image: rayproject/ray:2.49.2
+  rayVersion: '2.49.2' # Matches likely version in NeMo container or close to it
   headGroupSpec:
     rayStartParams:
       # ulimit is handled by the container runtime automatically now
@@ -18,7 +18,7 @@ spec:
       metadata:
         annotations:
           gke-gcsfuse/cpu-limit: "0"
-          gke-gcsfuse/ephemeral-storage-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "30Gi"
           gke-gcsfuse/memory-limit: "0"
           gke-gcsfuse/volumes: "true"
       spec:
@@ -27,8 +27,8 @@ spec:
         terminationGracePeriodSeconds: 300
         initContainers:
         - name: install-ray
-          image: nvcr.io/nvidia/nemo:24.07
-          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"click==8.1.3\" \"ray[default]==2.33.0\""]
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"ray[default]==2.49.2\""]
           volumeMounts:
           - mountPath: /tmp/ray
             name: ray-logs
@@ -37,12 +37,10 @@ spec:
         containers:
         - name: ray-head
           # Using NVIDIA NeMo 24.07 container as discussed
-          image: nvcr.io/nvidia/nemo:24.07
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
           env:
           - name: PYTHONPATH
             value: "/tmp/ray/packages"
-          - name: PATH
-            value: "/tmp/ray/packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           - name: RAY_enable_autoscaler_v2
             value: "1"
           - name: ORCHESTRATOR
@@ -113,8 +111,8 @@ spec:
         restartPolicy: Never
         initContainers:
         - name: install-ray
-          image: nvcr.io/nvidia/nemo:24.07
-          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"click==8.1.3\" \"ray[default]==2.33.0\""]
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"ray[default]==2.49.2\""]
           volumeMounts:
           - mountPath: /tmp
             name: ray-tmp-storage
@@ -130,12 +128,10 @@ spec:
             effect: "NoSchedule"
         containers:
         - name: ray-worker
-          image: nvcr.io/nvidia/nemo:24.07
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
           env:
            - name: PYTHONPATH
              value: "/tmp/ray/packages"
-           - name: PATH
-             value: "/tmp/ray/packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
            - name: LD_LIBRARY_PATH
              value: /usr/local/nvidia/lib64:/usr/local/gib/lib64
            - name: NCCL_CROSS_NIC
@@ -205,4 +201,4 @@ spec:
             volumeAttributes:
               bucketName: ikwak-ray-tf
               gcsfuseMetadataPrefetchOnMount: "true"
-              mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
+              mountOptions: "implicit-dirs,file-mode=777,dir-mode=777,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1"

@@ -75,3 +75,47 @@ The evolution from the original VERL-based manifest to the robust NeMo-RL manife
   * *Original:* The VERL worker arbitrarily set `command: ["source..."]`, which catastrophically overrode KubeRay's ability to inject the actual `ray start` command, causing pods to hang.
   * *New:* Implemented a native bash proxy: `command: ["/bin/bash", "-c", "export PATH...; eval \"$*\""]`. This intercepts KubeRay's dynamically generated `$*` start commands and safely executes them *after* we source our custom environments.
 * **NCCL Networking & Storage Optimization:** Explicitly surfaced 15+ highly tuned `NCCL_*` environment variables (e.g., `NCCL_ALGO=Ring,Tree`, `NCCL_CROSS_NIC=1`) on the workers to maximize B200 RDMA throughput. Cleaned up legacy `hostPath` volumes (`lib64`, `sys`, `proc-sys`) that were unmounted and contributing to manifest bloat.
+
+### 5. Why doesn't KubeRay auto-update Pods when `kubectl apply` changes the image tag?
+In standard Kubernetes, updating a `Deployment` triggers a "Rolling Update" where old pods are gracefully killed and replaced. However, a `RayCluster` is a tightly coupled, distributed orchestration engine managed by the **KubeRay Operator**. 
+The operator intentionally prevents auto-rolling Pods on image changes because tearing down an active Ray Worker or Head node mid-flight would brutally sever active actor connections, destroy the distributed memory object store, and instantly wipe any running AI training jobs. To change the fundamental container image of a Ray cluster, the safest, industry-standard approach is to manually delete the KubeRay Cluster (`kubectl delete raycluster`) and instantly re-apply it, guaranteeing a clean, synchronized boot across all interconnected nodes.
+
+### 6. The Final Boss: Python 3.10 vs 3.12 (PEP 621 Workspaces)
+After stabilizing the pod runtime, the dynamic `setup_nemo_rl.sh` execution script failed during the `uv pip install -e ".[vllm]"` phase with a fatal packaging error regarding the internal `nemo-automodel` workspace. 
+* **The Symptoms:** Switching to `uv sync --extra vllm` correctly parsed the PEP 621 workspaces, but instantly revealed the true source of all NeMo-RL friction: `ERROR: Package 'nemo-rl' requires a different Python: 3.10.12 not in '>=3.12'`. 
+* **The Root Cause:** Our highly stable baseline container (`nvcr.io/nvidia/nemo:24.07`) relies on Python 3.10. The bleeding-edge `NVIDIA-NeMo/RL` main branch explicitly dropped support for it.
+* **The Resolution:** To align the infrastructure, we completely migrated the `ray-cluster-b200-nemo.yaml` references to utilize `nvcr.io/nvidia/nemo-rl:v0.5.0` (which natively ships Python 3.12) and upgraded the base `install-ray` daemon from `2.33.0` to `2.49.2`. This unified the stack, dissolved all `click`/`deepcopy` bugs, and allowed the GRPO workflow to compile flawlessly.
+
+### 7. Native Container Optimization and Dataset Schema Flattening
+While attempting to `ray job submit` a custom `setup_nemo_rl.sh` wrapper, we discovered the payload was redundant. The `nvcr.io/nvidia/nemo-rl:v0.5.0` container naturally embeds a pre-compiled version of the entire framework at `/opt/nemo-rl` running on a native `/opt/nemo_rl_venv` environment!
+* **The Refactor:** We completely deleted `setup_nemo_rl.sh`. The `launch_grpo.sh` script now simply beams the configuration YAMLs into `/workspace` and triggers `/opt/nemo_rl_venv/bin/python` securely using the native container assets.
+* **The Schema Trap:** Using the natively embedded `v0.5.0` pipeline introduced a mismatch with our locally-checked-out `main` branch configs. The job instantly crashed with `KeyError: 'prompt_file'` and `KeyError: 'dataset_name'`. 
+* **Resolution:** The `nemo-rl:v0.5.0` engine expects dataset fields flattened directly at the root of the `data:` dictionary block, differing from `main` which nests them under `default:` and `train:`. We flattened `grpo_math_1b.yaml` to match the exact schema explicitly required by the active v0.5.0 trainer.
+
+### 8. The Eviction Nightmare: Mitigating HuggingFace & GCS-Fuse Storage Exhaustion
+The job successfully dispatched from the Ray Head, but moments later the Head Pod mysteriously evaporated from the cluster (`Error from server (NotFound)`).
+* **The Symptoms:** Digging into `kubectl get events`, we found KubeRay hadn't deleted the pod. Kubernetes forcefully `Evicted` it: `Pod ephemeral local storage usage exceeds the total limit of containers 9Gi.` The crash mathematically occurred exactly at ~11% during the `Generating train split` HuggingFace phase for OpenMathInstruct-2.
+* **The First Attempt:** We modified `launch_grpo.sh` to dynamically inject `export HF_HOME=/data/huggingface` directly into the Ray Job. However, the pod *still* crashed at exactly 11%.
+* **The Root Cause:** While `HF_HOME` correctly redirected the HuggingFace cache traffic to the `/data` mount, the underlying GKE GCS-Fuse CSI driver internally provisions an `emptyDir` cache volume (`gcsfuse-cache`) natively bounded to the pod's `9Gi` ephemeral storage limit. Because the `file-cache:enable-parallel-downloads:true` flag was active, the sidecar aggressively downloaded the giant Parquet chunks into the local 9Gi disk pool before handing them to HuggingFace, triggering the instant node-level eviction.
+* **The Resolution:** 
+    1. We stripped the aggressive `file-cache` flags from the manifest's `mountOptions`. 
+  2. Crucially, we injected `gke-gcsfuse/ephemeral-storage-limit: "30Gi"` directly into the `headGroupSpec` template annotations in `ray-cluster-b200-nemo.yaml`. This explicitly overrides KubeRay's default `0` fallback behavior, actively reserving an allocated 30Gi volume strictly for the sidecar without breaking the rigid spot constraints of the `default-pool` nodes (which failed scheduling at a 50Gi request). The dataset processing flawlessly scales to completion.
+
+### 9. The FlashInfer Block Size Bug: Gemma 3 Initialization
+During the initial successful launch of the Gemma 3 GRPO training job, the `vllmWorker` actors crashed during engine initialization with the following error:
+`AssertionError: There is a bug in FlashInfer block_size 16 head size 256 support. Please avoid this combination by passing --block-size 32 or --block-size 64.`
+
+* **The Root Cause:** Gemma 3 uses a head dimension of 256. vLLM defaults to a `block_size` of 16 for its KV cache blocks. This specific combination triggers a known bug in the FlashInfer backend.
+* **The Failed Workaround:** We initially attempted to bypass this by setting `block_size_tokens: 32` loosely within the `vllm_cfg` block of our experiment YAML. However, reviewing NeMo RL's internal `vllm_worker.py` initialization code revealed that the framework explicitly strips parameters and reconstructs `llm_kwargs` manually before passing them to the `vllm.LLM()` constructor, meaning `block_size_tokens` inside `vllm_cfg` was silently ignored.
+* **The Resolution:** To successfully inject the parameter into the underlying vLLM engine, we nested the setting under a `vllm_kwargs` block directly alongside `vllm_cfg` in the job manifest (`grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`):
+  ```yaml
+    generation:
+      max_new_tokens: 512
+      vllm_cfg:
+        max_model_len: 512
+        enforce_eager: true
+        load_format: "auto"
+      vllm_kwargs:
+        block_size: 32
+  ```
+  This successfully bypassed the FlashInfer assertion, allowed the TRTLLM compilation to proceed, and stabilized the generation loop.

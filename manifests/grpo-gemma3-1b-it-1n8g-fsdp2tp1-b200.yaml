@@ -1,0 +1,43 @@
+defaults: grpo_math_1b.yaml
+
+grpo:
+  max_num_steps: 20
+  val_period: 5
+  val_at_start: true
+  val_at_end: true
+
+checkpointing:
+  checkpoint_dir: results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
+
+policy:
+  model_name: google/gemma-3-1b-it
+  max_total_sequence_length: 2048
+  tokenizer:
+    name: google/gemma-3-1b-it
+    chat_template_kwargs:
+      enable_thinking: true
+  dynamic_batching:
+    enabled: true
+  sequence_packing:
+    enabled: false
+  make_sequence_length_divisible_by: 1
+  generation:
+    max_new_tokens: 1024
+    vllm_cfg:
+      max_model_len: 2048
+      enforce_eager: true
+      load_format: "auto"
+    vllm_kwargs:
+      block_size: 32
+
+data:
+  max_input_seq_length: 1024
+
+logger:
+  log_dir: /data/nemo-rl-logs/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
+  wandb_enabled: false
+  tensorboard_enabled: true
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1

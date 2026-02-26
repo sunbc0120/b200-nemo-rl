@@ -4,14 +4,14 @@ This guide details how to seamlessly deploy a Ray cluster on Google Kubernetes E
 
 The cluster provisions **B200** Spot instances (8 GPUs per node) and mounts a high-performance Google Cloud Storage (GCS) bucket natively using the Fuse CSI driver.
 
-## Prerequisites
+## 📋 Prerequisites
 - Authenticated `kubectl` context pointing to your target GKE cluster.
 - The `ray-cluster-b200-nemo.yaml` manifest.
 - A valid HuggingFace Access Token exported into your terminal (`export HF_TOKEN="hf_..."`) to download gated Gemma 3 weights.
 
-## Deployment Instructions
+## 🚀 Deployment Instructions
 
-### 1. Ensure a Clean State
+### 1. 🧹 Ensure a Clean State
 If you have an existing or stale Ray cluster running on the target node pools, you must tear it down first to free up the expensive GPU resources and avoid scheduling deadlocks.
 
 ```bash
@@ -22,7 +22,7 @@ kubectl delete raycluster ray-cluster-b200
 kubectl delete raycluster ray-cluster-b200-nemo
 ```
 
-### 2. Apply the Manifest
+### 2. 📄 Apply the Manifest
 The manifest defines a RayCluster Custom Resource (CRD). The KubeRay operator will intercept this and begin provisioning the Head and Worker pods.
 
 ```bash
@@ -31,7 +31,7 @@ kubectl apply -f manifests/ray-cluster-b200-nemo.yaml
 
 *Note: The YAML explicitly configures `replicas: 2` under `workerGroupSpecs`, requesting 16 B200 GPUs total. Adjust this value in the YAML if you need a different scale.*
 
-### 3. Monitor the Cold Boot
+### 3. ⏳ Monitor the Cold Boot
 Ray pods initialize via an `initContainer` (`install-ray`) which downloads the raw python orchestrator binaries into a temporary volume before the main container starts. This takes roughly 45-60 seconds.
 
 Watch the pod spin-up process:
@@ -40,7 +40,7 @@ kubectl get pods -l ray.io/cluster=ray-cluster-b200-nemo -w
 ```
 Wait until both the `ray-head` and `ray-worker` pods reach the `Running` state and register `Ready` (e.g., `4/4` and `3/3`).
 
-### 4. Verify Cluster Health
+### 4. 🩺 Verify Cluster Health
 Once the pods are running, connect to the Head node and query the native Ray daemon to ensure all worker GPUs are actively registered in the pool.
 
 ```bash
@@ -53,7 +53,7 @@ kubectl exec $HEAD_POD -c ray-head -- /bin/bash -c "export PATH=/tmp/ray/package
 
 If successful, you will see a console output reporting **232 active CPUs** and **16.0 active GPUs** (assuming 2 replicas).
 
-## 5. Connect to the Ray Dashboard
+## 5. 🖥️ Connect to the Ray Dashboard
 You can monitor the cluster's GPU utilization, view logs, and track the real-time progress of jobs via the Ray Dashboard. Set up a local port-forward to the Ray Head service using `kubectl`:
 
 ```bash
@@ -62,7 +62,7 @@ kubectl port-forward svc/ray-cluster-b200-nemo-head-svc 8265:8265
 
 Once that is running, open your web browser and navigate to: **[http://localhost:8265](http://localhost:8265)**
 
-## 6. Real-time TensorBoard Analytics (GCS Backed)
+## 6. 📈 Real-time TensorBoard Analytics (GCS Backed)
 Because the `grpo-*.yaml` is configured to write logs to `/data/nemo-rl-logs`, we are streaming metrics directly into Google Cloud Storage via the Kubernetes FUSE mount. You can natively run TensorBoard on the cluster to track these logs!
 
 Spin up the TensorBoard daemon in the background of the Head Pod:
@@ -77,7 +77,29 @@ kubectl port-forward $RAY_HEAD_POD 6006:6006
 ```
 Open **[http://localhost:6006](http://localhost:6006)** in your browser. As VLLM processes chunks of logic and the rewards calculate, this dashboard will update natively from the dataset in your Cloud Storage Bucket!
 
-## 7. Job Execution (GRPO Gemma 3)
+### Navigating the TensorBoard UI
+
+**Step 1: Clean Up the View**
+On the left side of your screen, under the **Run** list, you see `exp_001`, `exp_002`, etc. Uncheck all the boxes except for your current active run. This will hide all the old, aborted test runs and leave behind one clean line on the graphs.
+
+**Step 2: The Only 3 Graphs You Need to Care About**
+At the very top of the page, click the **SCALARS** tab. Search for and pin these three metrics:
+
+1. 🏆 **Average Reward (or Accuracy)** -> `metrics/reward` or `metrics/avg_reward`
+   * **What it means:** This is the ultimate "is it working" line. It combines how well your model is formatting the `<think>` tags and whether it actually got the right math answer. 
+   * **What you want:** A steady climb up and to the right from your baseline (e.g., 30%).
+
+2. 🧠 **Mean Generation Length** -> `metrics/mean_generation_length` (or `generation_tokens`)
+   * **What it means:** How long Gemma 3 is thinking before it spits out a final answer. 
+   * **What you want:** In reasoning tasks, you *want* this line to go up over time! It proves the model is learning to spend more tokens exploring the problem logically before rushing an answer.
+
+3. 📉 **KL Divergence Error** -> `metrics/kl_error` (or `policy_kl`)
+   * **What it means:** This measures how much the model's "brain structure" has drifted from the original, un-trained state.
+   * **What you want:** A low, stable line! If this spikes wildly and stays high, it means the model has "mode-collapsed" (it found a hack to cheat the reward system by forgetting English and just spamming XML tags infinitely). If the KL penalty is working, this will flatline ideally.
+
+*(Everything else—like `samples_per_sec` or `policy_training_lck`—are just hardware diagnostics. Keep your eyes on the Reward and Generation Length!)*
+
+## 7. 🚀 Job Execution (GRPO Gemma 3)
 Your infrastructure is now fully stabilized and distributed! You do **not** need a local Python environment or a local Ray installation.
 
 To initiate the training pipeline, we leverage a native bash wrapper (`launch_grpo.sh`) that uses `kubectl exec` to proxy into the Head pod and trigger Ray's native JobSubmissionClient from *inside* the cluster:
@@ -95,7 +117,7 @@ This script will automatically:
 2. Inject your `$HF_TOKEN`, `setup_nemo_rl.sh`, and custom `grpo-gemma*.yaml` manifests directly into the Head node's `/workspace`.
 3. Broadcast the codebase to all Workers via `ray job submit` and commence OpenMathInstruct-2 GRPO modeling!
 
-## Inspecting Raw Generation Outputs
+## 8. 🔍 Inspecting Raw Generation Outputs
 
 The framework aggregates all generation trajectories, prompt inputs, and computed rewards at every step. Because they are not currently synced to an external dashboard, they reside natively inside the Ray Head Pod.
 
@@ -111,7 +133,7 @@ Running that will output a clean JSON block showing you the exact math problem, 
 
 To view different steps as training progresses, you can simply change `train_data_step1.jsonl` to `train_data_step60.jsonl` (or whichever step you want to inspect). *Note: Ensure you update `exp_008` to match your actual experiment run directory.*
 
-## Gemma 3 Special Tokens Handing
+## 9. 🪙 Gemma 3 Special Tokens Handling
 
 Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_processor` handles them natively via HuggingFace's `apply_chat_template`:
 
@@ -119,20 +141,8 @@ Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_p
 2. **`<|thought|>` (Reasoning Mode)**: This is turned off by default in the chat template. By modifying `policy.tokenizer.chat_template_kwargs: {enable_thinking: true}` in your YAML config, this token is injected to force the model into its internal reasoning phase.
 3. **`<|file_separator|>` and `<|n_th_step|>`**: Strictly used for multimodal layout or tool-calling steps. NeMo-RL safely ignores these during text-only generation.
 
-## Troubleshooting
 
-### "Bug in FlashInfer block_size 16 head size 256 support"
-If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.
-
-To fix this, ensure your configuration YAML (e.g., `grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
-```yaml
-  policy:
-    generation:
-      vllm_kwargs:
-        block_size: 32
-```
-
-## Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
+## 10. 💾 Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
 
 Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch natively saves the model checkpoints in **Distributed Checkpoint (DCP)** format.
 
@@ -151,7 +161,7 @@ kubectl exec -it $RAY_HEAD_POD -- bash -c "python /opt/nemo-rl/examples/converte
     --hf-ckpt-path /data/nemo-rl-results/hf_merged_gemma3_step100"
 ```
 
-## Adding Custom Reward Functions
+## 11. 🎯 Adding Custom Reward Functions
 
 NeMo-RL is natively designed for modular reward engineering. Rather than strictly entangling rewards with the PPO/GRPO core loops, the framework executes simple Python functions mapped via YAML configs.
 
@@ -190,4 +200,17 @@ env:
       weight: 0.8
     - name: "no_swearing"
       weight: 1.0  # Applied as a heavy penalty multiplier
+```
+
+## 12. 🛠️ Troubleshooting
+
+### "Bug in FlashInfer block_size 16 head size 256 support"
+If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.
+
+To fix this, ensure your configuration YAML (e.g., `grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
+```yaml
+  policy:
+    generation:
+      vllm_kwargs:
+        block_size: 32
 ```

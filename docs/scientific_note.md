@@ -48,3 +48,16 @@ If `vllm_cfg.async_engine: True` is enabled in the configuration YAML, the frame
 * The PyTorch training workers continuously ingest that asynchronous buffer and execute optimizer steps simultaneously.
 
 This architecture drastically improves Wall-Clock time and keeps GPUs pegged near 100% saturation. However, it introduces **Policy Staleness** (Off-Policy corrections), which is mathematically complex and can sometimes destabilize or completely diverge training, especially on sensitive reasoning tasks. It is highly recommended to stick to `async_engine: False` to establish a healthy, converging baseline before attempting to optimize via asynchronous decoupled mechanics.
+
+## Logging & Observability
+
+### Why do we need W&B / TensorBoard when we have the Ray Dashboard?
+They serve completely different, but equally critical, purposes:
+
+1. **Ray Dashboard = Infrastructure & System Health**
+   * It tells you **HOW** the hardware is executing. Is the cluster OOMing? Are GPUs at 100% utilization? Which Python worker crashed and what is the stack trace?
+   * **The Catch:** As soon as the Ray Cluster shuts down or the Pod is deleted, all of this data is completely erased.
+
+2. **TensorBoard / W&B = Machine Learning Metrics**
+   * They tell you **WHAT** the math is doing. Is the Reward actually going up? Is the Policy Mode-Collapsing (KL Divergence exploding)?
+   * **The Catch:** These loggers natively track historical data over months. You can overlay the graph from *Experiment #1* (Learning Rate 1e-4) directly on top of *Experiment #2* (Learning Rate 5e-5) to see which one mathematically converges faster. The Ray dashboard cannot compare historical training runs.

@@ -62,6 +62,8 @@ kubectl port-forward svc/ray-cluster-b200-nemo-head-svc 8265:8265
 
 Once that is running, open your web browser and navigate to: **[http://localhost:8265](http://localhost:8265)**
 
+![Ray Dashboard UI](results/ray_dashboard.png)
+
 ## 6. 📈 Real-time TensorBoard Analytics (GCS Backed)
 Because the `grpo-*.yaml` is configured to write logs to `/data/nemo-rl-logs`, we are streaming metrics directly into Google Cloud Storage via the Kubernetes FUSE mount. You can natively run TensorBoard on the cluster to track these logs!
 
@@ -76,6 +78,8 @@ Then, execute a local port-forward to your machine:
 kubectl port-forward $RAY_HEAD_POD 6006:6006
 ```
 Open **[http://localhost:6006](http://localhost:6006)** in your browser. As VLLM processes chunks of logic and the rewards calculate, this dashboard will update natively from the dataset in your Cloud Storage Bucket!
+
+![TensorBoard Metrics](results/tensorboard.png)
 
 ### Navigating the TensorBoard UI
 
@@ -133,7 +137,17 @@ Running that will output a clean JSON block showing you the exact math problem, 
 
 To view different steps as training progresses, you can simply change `train_data_step1.jsonl` to `train_data_step60.jsonl` (or whichever step you want to inspect). *Note: Ensure you update `exp_008` to match your actual experiment run directory.*
 
-## 9. 🪙 Gemma 3 Special Tokens Handling
+## 9. 📊 Visualizing Evaluation Progress
+
+During each evaluation phase, the model is tested on its mathematical reasoning capabilities. The following table showcases the model's trajectory across different training steps, highlighting how its `<think>` process evolves over time:
+
+| Step | Generation Profile | Step | Generation Profile |
+|:---:|:---|:---:|:---|
+| **Step 10** | ![Eval 10](results/eval_10.png) | **Step 20** | ![Eval 20](results/eval_20.png) |
+| **Step 30** | ![Eval 30](results/eval_30.png) | **Step 40** | ![Eval 40](results/eval_40.png) |
+| **Step 50** | ![Eval 50](results/eval_50.png) | | |
+
+## 10. 🪙 Gemma 3 Special Tokens Handling
 
 Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_processor` handles them natively via HuggingFace's `apply_chat_template`:
 
@@ -142,7 +156,7 @@ Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_p
 3. **`<|file_separator|>` and `<|n_th_step|>`**: Strictly used for multimodal layout or tool-calling steps. NeMo-RL safely ignores these during text-only generation.
 
 
-## 10. ♻️ Restarting a Run from Scratch (Disabling Auto-Resume)
+## 11. ♻️ Restarting a Run from Scratch (Disabling Auto-Resume)
 
 By default, NeMo-RL will **implicitly resume** from the last available PyTorch checkpoint if it detects an existing `results/<experiment_name>` folder on the local disk. There is no explicit `--no-resume` flag in the YAML config.
 
@@ -167,7 +181,7 @@ echo "Cluster wiped. Safe to launch!"
 ```
 
 
-## 11. 💾 Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
+## 12. 💾 Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
 
 Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch natively saves the model checkpoints in **Distributed Checkpoint (DCP)** format.
 
@@ -186,7 +200,7 @@ kubectl exec -it $RAY_HEAD_POD -- bash -c "python /opt/nemo-rl/examples/converte
     --hf-ckpt-path /data/nemo-rl-results/hf_merged_gemma3_step100"
 ```
 
-## 12. 🎯 Adding Custom Reward Functions
+## 13. 🎯 Adding Custom Reward Functions
 
 NeMo-RL is natively designed for modular reward engineering. Rather than strictly entangling rewards with the PPO/GRPO core loops, the framework executes simple Python functions mapped via YAML configs.
 
@@ -227,7 +241,7 @@ env:
       weight: 1.0  # Applied as a heavy penalty multiplier
 ```
 
-## 13. 🛠️ Troubleshooting
+## 14. 🛠️ Troubleshooting
 
 ### "Bug in FlashInfer block_size 16 head size 256 support"
 If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.

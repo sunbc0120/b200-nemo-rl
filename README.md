@@ -96,6 +96,14 @@ Running that will output a clean JSON block showing you the exact math problem, 
 
 To view different steps as training progresses, you can simply change `train_data_step1.jsonl` to `train_data_step60.jsonl` (or whichever step you want to inspect). *Note: Ensure you update `exp_008` to match your actual experiment run directory.*
 
+## Gemma 3 Special Tokens Handing
+
+Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_processor` handles them natively via HuggingFace's `apply_chat_template`:
+
+1. **`<start_of_turn>` and `<end_of_turn>`**: Injected automatically around user/model prompts when `add_generation_prompt=True` is executed.
+2. **`<|thought|>` (Reasoning Mode)**: This is turned off by default in the chat template. By modifying `policy.tokenizer.chat_template_kwargs: {enable_thinking: true}` in your YAML config, this token is injected to force the model into its internal reasoning phase.
+3. **`<|file_separator|>` and `<|n_th_step|>`**: Strictly used for multimodal layout or tool-calling steps. NeMo-RL safely ignores these during text-only generation.
+
 ## Troubleshooting
 
 ### "Bug in FlashInfer block_size 16 head size 256 support"

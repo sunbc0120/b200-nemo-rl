@@ -4,12 +4,14 @@ grpo:
   max_num_steps: 500
 
 checkpointing:
-  checkpoint_dir: results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
+  checkpoint_dir: /data/nemo-rl-results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
 
 policy:
   model_name: google/gemma-3-1b-it
   tokenizer:
     name: google/gemma-3-1b-it
+    chat_template_kwargs:
+      enable_thinking: true
   dynamic_batching:
     enabled: true
   sequence_packing:
@@ -28,12 +30,9 @@ data:
   max_input_seq_length: 512
 
 logger:
-  log_dir: logs/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
-  wandb_enabled: true
+  log_dir: /data/nemo-rl-logs/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
+  wandb_enabled: false
   tensorboard_enabled: true
-  wandb:
-    project: nemo-rl
-    name: grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200
 
 cluster:
   gpus_per_node: 8

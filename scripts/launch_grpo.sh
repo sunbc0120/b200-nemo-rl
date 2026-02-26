@@ -28,7 +28,7 @@ kubectl cp manifests/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml $RAY_HEAD_POD:/wo
 # This leverages the completely pre-installed NeMo-RL codebase natively present at /opt/nemo-rl!
 echo "Submitting Ray Job from inside the cluster..."
 
-CMD="ray job submit --working-dir /workspace -- bash -c \"export HF_TOKEN=$HF_TOKEN && export HF_HOME=/data/huggingface && export WANDB_MODE=disabled && cd /opt/nemo-rl && /opt/nemo_rl_venv/bin/python examples/run_grpo_math.py --config /workspace/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml cluster.num_nodes=1\""
+CMD="ray job submit --working-dir /workspace -- bash -c \"export HF_TOKEN=$HF_TOKEN && export HF_HOME=/data/huggingface && cd /opt/nemo-rl && /opt/nemo_rl_venv/bin/python examples/run_grpo_math.py --config /workspace/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml cluster.num_nodes=1\""
 
 kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "$CMD"
 

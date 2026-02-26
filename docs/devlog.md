@@ -99,5 +99,23 @@ The job successfully dispatched from the Ray Head, but moments later the Head Po
 * **The Root Cause:** While `HF_HOME` correctly redirected the HuggingFace cache traffic to the `/data` mount, the underlying GKE GCS-Fuse CSI driver internally provisions an `emptyDir` cache volume (`gcsfuse-cache`) natively bounded to the pod's `9Gi` ephemeral storage limit. Because the `file-cache:enable-parallel-downloads:true` flag was active, the sidecar aggressively downloaded the giant Parquet chunks into the local 9Gi disk pool before handing them to HuggingFace, triggering the instant node-level eviction.
 * **The Resolution:** 
     1. We stripped the aggressive `file-cache` flags from the manifest's `mountOptions`. 
-    2. Crucially, we injected `gke-gcsfuse/ephemeral-storage-limit: "30Gi"` directly into the `headGroupSpec` template annotations in `ray-cluster-b200-nemo.yaml`. This explicitly overrides KubeRay's default `0` fallback behavior, actively reserving an allocated 30Gi volume strictly for the sidecar without breaking the rigid spot constraints of the `default-pool` nodes (which failed scheduling at a 50Gi request). The dataset processing flawlessly scales to completion.
+  2. Crucially, we injected `gke-gcsfuse/ephemeral-storage-limit: "30Gi"` directly into the `headGroupSpec` template annotations in `ray-cluster-b200-nemo.yaml`. This explicitly overrides KubeRay's default `0` fallback behavior, actively reserving an allocated 30Gi volume strictly for the sidecar without breaking the rigid spot constraints of the `default-pool` nodes (which failed scheduling at a 50Gi request). The dataset processing flawlessly scales to completion.
 
+### 9. The FlashInfer Block Size Bug: Gemma 3 Initialization
+During the initial successful launch of the Gemma 3 GRPO training job, the `vllmWorker` actors crashed during engine initialization with the following error:
+`AssertionError: There is a bug in FlashInfer block_size 16 head size 256 support. Please avoid this combination by passing --block-size 32 or --block-size 64.`
+
+* **The Root Cause:** Gemma 3 uses a head dimension of 256. vLLM defaults to a `block_size` of 16 for its KV cache blocks. This specific combination triggers a known bug in the FlashInfer backend.
+* **The Failed Workaround:** We initially attempted to bypass this by setting `block_size_tokens: 32` loosely within the `vllm_cfg` block of our experiment YAML. However, reviewing NeMo RL's internal `vllm_worker.py` initialization code revealed that the framework explicitly strips parameters and reconstructs `llm_kwargs` manually before passing them to the `vllm.LLM()` constructor, meaning `block_size_tokens` inside `vllm_cfg` was silently ignored.
+* **The Resolution:** To successfully inject the parameter into the underlying vLLM engine, we nested the setting under a `vllm_kwargs` block directly alongside `vllm_cfg` in the job manifest (`grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`):
+  ```yaml
+    generation:
+      max_new_tokens: 512
+      vllm_cfg:
+        max_model_len: 512
+        enforce_eager: true
+        load_format: "auto"
+      vllm_kwargs:
+        block_size: 32
+  ```
+  This successfully bypassed the FlashInfer assertion, allowed the TRTLLM compilation to proceed, and stabilized the generation loop.

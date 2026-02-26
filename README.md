@@ -62,7 +62,22 @@ kubectl port-forward svc/ray-cluster-b200-nemo-head-svc 8265:8265
 
 Once that is running, open your web browser and navigate to: **[http://localhost:8265](http://localhost:8265)**
 
-## 6. Job Execution (GRPO Gemma 3)
+## 6. Real-time TensorBoard Analytics (GCS Backed)
+Because the `grpo-*.yaml` is configured to write logs to `/data/nemo-rl-logs`, we are streaming metrics directly into Google Cloud Storage via the Kubernetes FUSE mount. You can natively run TensorBoard on the cluster to track these logs!
+
+Spin up the TensorBoard daemon in the background of the Head Pod:
+```bash
+RAY_HEAD_POD=$(kubectl get pods -l ray.io/cluster=ray-cluster-b200-nemo -l ray.io/node-type=head -o 'jsonpath={.items[0].metadata.name}')
+kubectl exec $RAY_HEAD_POD -- bash -c "nohup tensorboard --logdir=/data/nemo-rl-logs/ --host=0.0.0.0 --port=6006 > /tmp/tensorboard.log 2>&1 &"
+```
+
+Then, execute a local port-forward to your machine:
+```bash
+kubectl port-forward $RAY_HEAD_POD 6006:6006
+```
+Open **[http://localhost:6006](http://localhost:6006)** in your browser. As VLLM processes chunks of logic and the rewards calculate, this dashboard will update natively from the dataset in your Cloud Storage Bucket!
+
+## 7. Job Execution (GRPO Gemma 3)
 Your infrastructure is now fully stabilized and distributed! You do **not** need a local Python environment or a local Ray installation.
 
 To initiate the training pipeline, we leverage a native bash wrapper (`launch_grpo.sh`) that uses `kubectl exec` to proxy into the Head pod and trigger Ray's native JobSubmissionClient from *inside* the cluster:
@@ -110,9 +125,68 @@ Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_p
 If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.
 
 To fix this, ensure your configuration YAML (e.g., `grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
-```yaml
   policy:
     generation:
       vllm_kwargs:
         block_size: 32
+```
+
+## Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
+
+Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch natively saves the model checkpoints in **Distributed Checkpoint (DCP)** format.
+
+### What is DCP?
+Instead of a single massive `model.safetensors` file, the DCP format shards the model weights and optimizer states into dozens of smaller `.pt` files. This allows PyTorch FSDP to asynchronously write checkpoints from all 8 GPUs simultaneously without choking the node's memory or encountering immediate lock-contention.
+
+However, VLLM and standard HuggingFace inference pipelines cannot natively read DCP shards. You must merge them back into a unified HuggingFace model.
+
+### How to Merge
+NeMo-RL ships with a native script to perform this merge on the cluster. After the training completes, run the following command directly on the Ray Head node to compile a specific `step_X` checkpoint into a `.safetensors` model ready for serving:
+
+```bash
+kubectl exec -it $RAY_HEAD_POD -- bash -c "python /opt/nemo-rl/examples/converters/convert_dcp_to_hf.py \
+    --config /data/nemo-rl-results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/step_100/policy/config.yaml \
+    --dcp-ckpt-path /data/nemo-rl-results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/step_100/policy/weights \
+    --hf-ckpt-path /data/nemo-rl-results/hf_merged_gemma3_step100"
+```
+
+## Adding Custom Reward Functions
+
+NeMo-RL is natively designed for modular reward engineering. Rather than strictly entangling rewards with the PPO/GRPO core loops, the framework executes simple Python functions mapped via YAML configs.
+
+To add a completely new reward (e.g., regex penalties, semantic formatting, custom logical rules):
+
+### 1. Write the Python Reward Function
+Open `/opt/nemo-rl/nemo_rl/environments/rewards.py` (either on your active cluster or in your fork) and define your function. It must accept the ground truth and model response, returning a `(float_reward, boolean_passed)` tuple.
+
+```python
+def no_swearing_penalty(ground_truth: str, response: str) -> tuple[float, bool]:
+    if "darn" in response.lower():
+        return -1.0, False  # Apply heavy penalty
+    return 0.0, True      # Neutral/Pass
+```
+
+### 2. Register the Function in the Environment
+Open `/opt/nemo-rl/nemo_rl/environments/vlm_environment.py`. Locate the `_instantiate_reward_functions` method and map a YAML string identifier to your new python function:
+
+```python
+elif reward_func_name == "no_swearing":
+    reward_func = no_swearing_penalty
+```
+
+### 3. Apply it in your YAML Config
+You can now construct massive multi-objective reward pipelines natively from your experiment's configuration file. The framework will automatically invoke `combine_reward_functions()` to calculate the weighted sum of all functions listed!
+
+```yaml
+env:
+  reward_functions:
+    - name: "format"
+      weight: 0.2
+      kwargs:
+        think_tag: "think"
+        answer_tag: "answer"
+    - name: "exact_alnum"
+      weight: 0.8
+    - name: "no_swearing"
+      weight: 1.0  # Applied as a heavy penalty multiplier
 ```

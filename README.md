@@ -142,7 +142,32 @@ Gemma 3 introduces several new special control tokens. NeMo-RL's `math_hf_data_p
 3. **`<|file_separator|>` and `<|n_th_step|>`**: Strictly used for multimodal layout or tool-calling steps. NeMo-RL safely ignores these during text-only generation.
 
 
-## 10. 💾 Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
+## 10. ♻️ Restarting a Run from Scratch (Disabling Auto-Resume)
+
+By default, NeMo-RL will **implicitly resume** from the last available PyTorch checkpoint if it detects an existing `results/<experiment_name>` folder on the local disk. There is no explicit `--no-resume` flag in the YAML config.
+
+If you abort a training job and want to start a brand new run with the exact same experiment name, you **must delete the old results folders** from both the Head Pod AND all Worker Pods (because PyTorch FSDP saves the fragmented model shards onto the local disks of the worker pods).
+
+Run these commands locally to completely flush the cluster's local disks before launching a fresh job:
+
+```bash
+EXPERIMENT="grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200"
+
+# 1. Wipe the Head Pod's configuration checkpoint
+RAY_HEAD_POD=$(kubectl get pods -l ray.io/cluster=ray-cluster-b200-nemo -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}')
+kubectl exec $RAY_HEAD_POD -- bash -c "rm -rf /opt/nemo-rl/results/$EXPERIMENT /opt/nemo-rl/logs/$EXPERIMENT"
+
+# 2. Wipe every Worker Pod's FSDP Shard weights
+WORKER_PODS=$(kubectl get pods -l ray.io/cluster=ray-cluster-b200-nemo -l ray.io/node-type=worker -o jsonpath='{.items[*].metadata.name}')
+for POD in $WORKER_PODS; do
+    kubectl exec $POD -- bash -c "rm -rf /opt/nemo-rl/results/$EXPERIMENT /opt/nemo-rl/logs/$EXPERIMENT"
+done
+
+echo "Cluster wiped. Safe to launch!"
+```
+
+
+## 11. 💾 Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
 
 Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch natively saves the model checkpoints in **Distributed Checkpoint (DCP)** format.
 
@@ -161,7 +186,7 @@ kubectl exec -it $RAY_HEAD_POD -- bash -c "python /opt/nemo-rl/examples/converte
     --hf-ckpt-path /data/nemo-rl-results/hf_merged_gemma3_step100"
 ```
 
-## 11. 🎯 Adding Custom Reward Functions
+## 12. 🎯 Adding Custom Reward Functions
 
 NeMo-RL is natively designed for modular reward engineering. Rather than strictly entangling rewards with the PPO/GRPO core loops, the framework executes simple Python functions mapped via YAML configs.
 
@@ -202,7 +227,7 @@ env:
       weight: 1.0  # Applied as a heavy penalty multiplier
 ```
 
-## 12. 🛠️ Troubleshooting
+## 13. 🛠️ Troubleshooting
 
 ### "Bug in FlashInfer block_size 16 head size 256 support"
 If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.

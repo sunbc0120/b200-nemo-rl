@@ -28,7 +28,7 @@ kubectl cp manifests/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml $RAY_HEAD_POD:/wo
 # This leverages the completely pre-installed NeMo-RL codebase natively present at /opt/nemo-rl!
 echo "Submitting Ray Job from inside the cluster..."
 
-CMD="ray job submit --working-dir /workspace --no-wait -- bash -c \"export HF_TOKEN=$HF_TOKEN && export HF_HOME=/data/huggingface && cd /opt/nemo-rl && /opt/nemo_rl_venv/bin/python examples/run_grpo_math.py --config /workspace/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml && echo 'Training finished. Streaming checkpoints to GCS Fuse...' && mkdir -p /data/nemo-rl-results && cp -r results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/ /data/nemo-rl-results/\""
+CMD="ray job submit --working-dir /workspace --no-wait -- bash -c \"export HF_TOKEN=$HF_TOKEN && export HF_HOME=/data/huggingface && cd /opt/nemo-rl && /opt/nemo_rl_venv/bin/python examples/run_grpo_math.py --config /workspace/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml && echo 'Training finished. Please run scripts/sync_checkpoints.sh to harvest FSDP shards to GCS.'\""
 
 OUTPUT=$(kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "$CMD" 2>&1)
 echo "$OUTPUT"
@@ -36,7 +36,11 @@ echo "$OUTPUT"
 # Extract the Job ID uniquely identifying the run
 JOB_ID=$(echo "$OUTPUT" | grep -o "raysubmit_[a-zA-Z0-9]*" | head -n 1 || true)
 
+# Stream console logs to GCS in the background on the Head Pod
+echo "Initiating background console log stream to GCS..."
+kubectl exec $RAY_HEAD_POD -- bash -c "nohup ray job logs $JOB_ID -f > /data/nemo-rl-logs/terminal_output_$JOB_ID.txt 2>&1 &"
+
 echo "========================================="
 echo "Job Successfully Submitted to Ray Daemon!"
-echo "To tail the live logs, run:"
+echo "To tail the live logs locally, run:"
 echo "kubectl exec -it $RAY_HEAD_POD -- ray job logs $JOB_ID -f"

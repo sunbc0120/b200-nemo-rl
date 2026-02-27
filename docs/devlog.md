@@ -130,3 +130,20 @@ When training with PyTorch FSDP2 in NeMo-RL using `model_save_format: "safetenso
   3. We authored `scripts/manual_merge_fsdp.py`.
   4. This custom script loads *all* raw PyTorch DCP sharded `.safetensors` files from disk at once into CPU RAM, detects partitioned tensors by shape (e.g., `down_proj`, `embed_tokens`), and explicitly runs `torch.cat(tensors, dim=0)` to physically crush the 8 chunks back into a single unified HuggingFace shape (like `262144` vocab size) *before* saving them to disk.
   5. Running this physical concatenation script flawlessly splices the padded GPU shards down into a single unified `model-00001-of-00001.safetensors` payload perfectly formatted for vLLM inference, scoring 45.8% Pass@1 on MATH-500 organically!
+
+### 11. Harmless PyTorch Inductor Cache Warnings (vLLM Initialization)
+When running evaluation scripts with vLLM across multiple GPUs (e.g., Tensor Parallelism 8), you will often see massive walls of traceback errors in the Ray logs during the initial "Capturing CUDA graphs" phase.
+
+**Example Log:**
+```
+(VllmGenerationWorker) _pickle.UnpicklingError: pickle data was truncated
+(VllmGenerationWorker) AttributeError: 'CompiledFxGraph' object has no attribute 'compiled_fn_runner'
+(VllmGenerationWorker) [0/0] fx graph cache unable to load compiled graph
+```
+
+**The Cause:**
+This is a known, harmless race condition in PyTorch's `torch.compile` Inductor cache mechanism. Because vLLM spawns 8 separate Ray worker processes simultaneously, all 8 workers attempt to read and write their independently compiled graph binaries into the exact same default cache directory (`/root/.cache/vllm_6/torch_compile_cache/`) at the exact same millisecond. 
+When one worker attempts to unpickle a cache file that another worker is currently halfway through writing, the truncation error occurs. 
+
+**The Verdict:**
+PyTorch gracefully catches these errors, falls back to compiling its own graph natively in memory, and moves on without issue. These exceptions can be safely ignored; they do not impact the correctness of the evaluation or the speed of inference.

@@ -46,31 +46,42 @@ VANILLA_MODEL=""
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
-        --checkpoint-dir) CHECKPOINT_DIR="$2"; shift 2;;
+        --checkpoint-dir) CHECKPOINT_DIR="$2"; shift ;;
         
         --skip-merge) 
-            SKIP_MERGE=true
-            if [[ "$2" == "true" || "$2" == "false" ]]; then shift 2; else shift 1; fi
+            if [[ "$2" == "true" || "$2" == "false" ]]; then
+                SKIP_MERGE="$2"
+                shift # Consume the explicit boolean argument
+            else
+                SKIP_MERGE=true
+            fi
             ;;
         --skip-merge=*) 
-            SKIP_MERGE=true; shift 1 ;;
+            SKIP_MERGE="${1#*=}"
+            ;;
             
         --skip-sync) 
-            SKIP_SYNC=true
-            if [[ "$2" == "true" || "$2" == "false" ]]; then shift 2; else shift 1; fi
+            if [[ "$2" == "true" || "$2" == "false" ]]; then
+                SKIP_SYNC="$2"
+                shift # Consume the explicit boolean argument
+            else
+                SKIP_SYNC=true
+            fi
             ;;
         --skip-sync=*) 
-            SKIP_SYNC=true; shift 1 ;;
+            SKIP_SYNC="${1#*=}"
+            ;;
             
-        --local-dir) LOCAL_MERGE_DIR="$2"; shift 2;;
-        --vanilla-model) VANILLA_MODEL="$2"; shift 2;;
+        --local-dir) LOCAL_MERGE_DIR="$2"; shift ;;
+        --vanilla-model) VANILLA_MODEL="$2"; shift ;;
         
         # Catch-all for KEY=VALUE pairs passed conventionally
-        SKIP_MERGE=*) SKIP_MERGE=true; shift 1;;
-        SKIP_SYNC=*) SKIP_SYNC=true; shift 1;;
+        SKIP_MERGE=*) SKIP_MERGE="${1#*=}" ;;
+        SKIP_SYNC=*) SKIP_SYNC="${1#*=}" ;;
         
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
+    shift
 done
 
 # If evaluating a vanilla model, force skip the merge and sync steps
@@ -94,27 +105,13 @@ if [ "$SKIP_MERGE" = false ]; then
     echo "Copying manual merge script to head pod..."
     kubectl cp scripts/merge_benchmarking/manual_merge_fsdp.py $RAY_HEAD_POD:/tmp/manual_merge_fsdp.py -c ray-head
 
-    # Create a local ephemeral directory on the head pod to avoid GCS-Fuse I/O bottlenecks during merge
-    echo "Staging raw DCP checkpoint shards to ephemeral SSD on Head Pod for fast merging..."
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "rm -rf /tmp/raw_dcp_checkpoint && mkdir -p /tmp/raw_dcp_checkpoint"
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "cp -v $CHECKPOINT_DIR/*.safetensors /tmp/raw_dcp_checkpoint/"
-    
-    echo "Staging HF Metadata..."
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "cp -rv $CHECKPOINT_DIR/.hf_metadata /tmp/raw_dcp_checkpoint/"
-
-    echo "Running manual merge script natively..."
-    # The script modifies the checkpoint dir in place, writing to consolidated_physical
-    kubectl exec -it $RAY_HEAD_POD -c ray-head -- bash -c "python /tmp/manual_merge_fsdp.py --checkpoint-dir /tmp/raw_dcp_checkpoint"
+    echo "Running manual merge script natively against GCS-Fuse..."
+    # The script reads directly from GCS-Fuse and writes to $CHECKPOINT_DIR/consolidated_physical
+    kubectl exec -it $RAY_HEAD_POD -c ray-head -- bash -c "python /tmp/manual_merge_fsdp.py --checkpoint-dir $CHECKPOINT_DIR"
     
     echo "Copying HF metadata to the consolidated folder..."
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "cp -v /tmp/raw_dcp_checkpoint/.hf_metadata/config.json /tmp/raw_dcp_checkpoint/consolidated_physical/"
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "cp -v /tmp/raw_dcp_checkpoint/.hf_metadata/generation_config.json /tmp/raw_dcp_checkpoint/consolidated_physical/ 2>/dev/null || true"
-
-    echo "Moving final consolidated model back to GCS for permanent storage..."
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "mkdir -p $CHECKPOINT_DIR/consolidated_physical && cp -rv /tmp/raw_dcp_checkpoint/consolidated_physical/* $CHECKPOINT_DIR/consolidated_physical/"
-    
-    echo "Cleaning up raw DCP staging..."
-    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "rm -rf /tmp/raw_dcp_checkpoint"
+    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "mkdir -p $CHECKPOINT_DIR/consolidated_physical && cp -v $CHECKPOINT_DIR/.hf_metadata/config.json $CHECKPOINT_DIR/consolidated_physical/"
+    kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "cp -v $CHECKPOINT_DIR/.hf_metadata/generation_config.json $CHECKPOINT_DIR/consolidated_physical/ 2>/dev/null || true"
 else
     echo "============================================="
     echo "1. Skipping Merge (Using existing consolidated_physical model)"
@@ -146,6 +143,9 @@ echo "3. Submitting MATH-500 Eval Ray Job"
 echo "============================================="
 CMD="ray job submit --working-dir /workspace -- bash -c \"
 export HF_HOME=/data/huggingface
+if [ -n '${HF_TOKEN}' ]; then
+    export HF_TOKEN='${HF_TOKEN}'
+fi
 
 echo 'Evaluating the model on MATH-500 using native NeMo-RL...'
 cd /opt/nemo-rl

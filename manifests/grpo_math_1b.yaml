@@ -74,11 +74,17 @@ checkpointing:
   checkpoint_dir: "results/grpo"
   metric_name: "val:accuracy" # one of "val:" or "train:" followed by the metric name
   higher_is_better: true
+  checkpoint_dir: null # Uses automated ephemeral disk results/..., harvested by sync_checkpoints.sh
+  save_nemo_format: false
+  # ---- CHANGED FOR DCP ----
+  # To use native PyTorch DCP (Distributed Checkpoint) for long-term safety:
+  model_save_format: "torch_save"  # Changed from "safetensors"
+  save_consolidated: false      # Changed from true to avoid the FSDP safetensor bug
+  # -------------------------
+  save_optimizer: false
   keep_top_k: 3
   save_period: 10
   checkpoint_must_save_by: null
-  model_save_format: "safetensors"
-  save_consolidated: false
 
 policy:
   model_name: "Qwen/Qwen2.5-1.5B"

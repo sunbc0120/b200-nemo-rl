@@ -1,0 +1,10 @@
+{
+  "model_name": "/tmp/hf_merged_model_eval",
+  "dataset_name": "math500",
+  "metric": "pass@k",
+  "k_value": 1,
+  "num_tests_per_prompt": 1,
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "top_k": -1
+}

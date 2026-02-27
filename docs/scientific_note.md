@@ -11,7 +11,7 @@ For the majority of RL tasks utilizing models under **~30 to 70 Billion Paramete
 2. **Speed of Execution:** vLLM has arguably the fastest generalized inference engine with PagedAttention. Handing off generation tasks to an explicitly co-located (or separately allocated) vLLM backend provides extreme rollout speed.
 3. **No 3D Topology Required:** Unlike Megatron, FSDP handles 1D sharding automatically without requiring the user to mathematically balance Pipeline Parallel (PP) and Tensor Parallel (TP) geometries across node boundaries.
 
-*In `grpo_math_1b.yaml`, `megatron_cfg.enabled` is `false` because a 1B model easily fits into VRAM when sharded via FSDP2 (`dtensor_cfg`), and the pipeline safely routes the generations via the `vllm_cfg` backend block.*
+*In `manifests/02_Job/grpo_math_1b.yaml`, `megatron_cfg.enabled` is `false` because a 1B model easily fits into VRAM when sharded via FSDP2 (`dtensor_cfg`), and the pipeline safely routes the generations via the `vllm_cfg` backend block.*
 
 ### When to Graduate to Megatron-Core
 Megatron-Core introduces extreme engineering complexity but unlocks capabilities that native PyTorch simply cannot achieve at unprecedented scales.
@@ -87,3 +87,21 @@ Absolutely not. This is famously known as the **"RLHF Alignment Tax" or "KL Rebo
 4. **The Next Step:** If you let training continue to Step 100+, the model will eventually learn the *balance*. It will figure out how to maintain the deep mathematical reasoning of Step 30 *without* triggering the linguistic KL penalty of Step 35.
 
 **Recommendation:** Do not use the post-crash `step_50` checkpoint for inference. If you want the smartest short-term model, `step_30` is currently your golden checkpoint before the crash. Otherwise, you need to spin the cluster back up and let it train to `step_150+` so it can stabilize past the KL rebound!
+
+## Implicit vs Explicit Reasoning (`<think>` Tags)
+
+When reviewing evaluation generation logs (e.g., `step_30`), users might notice that the model outputs massive blocks of rambling mathematical logic, but **never explicitly wraps its thoughts in `<think>...</think>` XML tags**.
+
+This is a direct result of the Reward Function design in the NeMo-RL Baseline:
+
+### Why is there no `<think>` tag?
+In many popular GRPO tutorials (like DeepSeek-R1 open-source replications), engineers manually parse the reasoning output by creating a reward function that explicitly enforces XML tags (penalizing the model if it fails to use them).
+
+However, the `manifests/02_Job/grpo_math_1b.yaml` baseline uses `math_verify_impl: "hf_math_verify"`. This reward model does not care at all about the formatting of the reasoning process. It simply uses advanced regex to scour the entire generation block for a final numerical conclusion (e.g., `The answer is \boxed{X}`) and checks if `X` matches the ground truth.
+
+Because the model is **never explicitly punished for omitting XML tags**, it learns a more "organic" reasoning process:
+1. It reads the prompt.
+2. It immediately begins talking to itself (the implicit "thinking" phase).
+3. Once it calculates the final logic, it prints `The answer is \boxed{X}`.
+
+So at Step 30, the model is absolutely "thinking" (generating massive, multi-hundred token internal monologues where it calculates the math step-by-step), but it doesn't wrap that monologue in `<think>...</think>` tags simply because the reward pipeline never commanded it to.

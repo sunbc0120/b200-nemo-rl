@@ -6,7 +6,7 @@ This document serves as a historical record of the exact challenges, architectur
 Our goal was to successfully spin up a Ray cluster equipped with robust NCCL (`set_nccl_env.sh`) configurations, a Native GCS Fuse storage mount (`/data`), and ensure `ray start` executed perfectly across large configurations (8x B200 spot instances).
 
 ## The Crash Loop Epidemic
-Upon initiating the `ray-cluster-b200-nemo.yaml` manifest for the first time, both the `ray-head` and `ray-worker` pods spawned, passed the `Init` container phase, but instantly transitioned into `0/X Error -> Terminating` loops, essentially flatlining the entire cluster without surfacing actionable metrics dynamically to the standard Ray Dashboard.
+Upon initiating the `manifests/01_Infra/ray-cluster-b200-nemo.yaml` manifest for the first time, both the `ray-head` and `ray-worker` pods spawned, passed the `Init` container phase, but instantly transitioned into `0/X Error -> Terminating` loops, essentially flatlining the entire cluster without surfacing actionable metrics dynamically to the standard Ray Dashboard.
 
 ### 1. The "Bash Subshell" Red Herring
 * **Hypothesis:** We suspected the KubeRay Operator injection mechanics were being thwarted by our custom `command` fields. KubeRay natively constructs a bash array: `ulimit -n 65536; ray start --block...`. 
@@ -14,7 +14,7 @@ Upon initiating the `ray-cluster-b200-nemo.yaml` manifest for the first time, bo
 * **Failure:** Despite building an airtight `bash -c` proxy loop and ensuring we injected `$PATH` manually for Kubelet, the pods continued to crash silently. Even eliminating the `command` field entirely to rely purely on native KubeRay resulted in instantaneous pod death.
 
 ### 2. The "Sleep Infinity" Revelation
-* **Strategy:** To intercept the runtime, we injected a deliberate freeze loop (`command: ["sleep infinity"]`) directly into the `ray-cluster-b200-nemo.yaml`. This gracefully paused the `ray start` trigger and allowed us to natively `kubectl exec` into the cluster and attempt the boot procedure interactively.
+* **Strategy:** To intercept the runtime, we injected a deliberate freeze loop (`command: ["sleep infinity"]`) directly into the `manifests/01_Infra/ray-cluster-b200-nemo.yaml`. This gracefully paused the `ray start` trigger and allowed us to natively `kubectl exec` into the cluster and attempt the boot procedure interactively.
 * **The Root Cause Discovered:** Upon running `ray start --head` natively inside the frozen container, we struck gold. The `ray` module triggered a massive, fatal Python 3.10 stack trace:
   ```python
   ValueError: <object object at 0x7e3bb463bdd0> is not a valid Sentinel
@@ -48,7 +48,7 @@ During debugging, concerns regarding where `pip` was installing packages (and wh
 It’s important to clarify that our deployment explicitly isolates the base orchestrator packages (`ray` / `click`) into an ephemeral, temporary disk specifically named `/tmp/ray/packages` (`emptyDir: {}`). This deliberate design keeps the high-performance network-shared GCS bucket pristine and reserved purely for housing our heavy training Datasets and Model Checkpoints. The `sys.path` dynamically references the temporary volume inside the local pod, negating the need for any complex shared-storage setups for our pip requirements! Furthermore, `uv` is utilized to install the actual NeMo-RL codebase later inside the Ray `runtime_env` payload specifically because it is vastly faster than PIP for massive training scripts, despite `pip` being perfectly adequate for fetching `ray` in the initContainer.
 
 ## Conclusion
-The `ray-cluster-b200-nemo.yaml` deployed is now deterministic, lightweight, heavily annotated for distributed networking via `rdma`, and fortified against dependency regressions. The `sleep infinity` debugging methodology proved invaluable in peeling back the layers from KubeRay obfuscation down to the raw Python exception.
+The `manifests/01_Infra/ray-cluster-b200-nemo.yaml` deployed is now deterministic, lightweight, heavily annotated for distributed networking via `rdma`, and fortified against dependency regressions. The `sleep infinity` debugging methodology proved invaluable in peeling back the layers from KubeRay obfuscation down to the raw Python exception.
 
 ## Architectural Q&A Appendix
 
@@ -84,13 +84,13 @@ The operator intentionally prevents auto-rolling Pods on image changes because t
 After stabilizing the pod runtime, the dynamic `setup_nemo_rl.sh` execution script failed during the `uv pip install -e ".[vllm]"` phase with a fatal packaging error regarding the internal `nemo-automodel` workspace. 
 * **The Symptoms:** Switching to `uv sync --extra vllm` correctly parsed the PEP 621 workspaces, but instantly revealed the true source of all NeMo-RL friction: `ERROR: Package 'nemo-rl' requires a different Python: 3.10.12 not in '>=3.12'`. 
 * **The Root Cause:** Our highly stable baseline container (`nvcr.io/nvidia/nemo:24.07`) relies on Python 3.10. The bleeding-edge `NVIDIA-NeMo/RL` main branch explicitly dropped support for it.
-* **The Resolution:** To align the infrastructure, we completely migrated the `ray-cluster-b200-nemo.yaml` references to utilize `nvcr.io/nvidia/nemo-rl:v0.5.0` (which natively ships Python 3.12) and upgraded the base `install-ray` daemon from `2.33.0` to `2.49.2`. This unified the stack, dissolved all `click`/`deepcopy` bugs, and allowed the GRPO workflow to compile flawlessly.
+* **The Resolution:** To align the infrastructure, we completely migrated the `manifests/01_Infra/ray-cluster-b200-nemo.yaml` references to utilize `nvcr.io/nvidia/nemo-rl:v0.5.0` (which natively ships Python 3.12) and upgraded the base `install-ray` daemon from `2.33.0` to `2.49.2`. This unified the stack, dissolved all `click`/`deepcopy` bugs, and allowed the GRPO workflow to compile flawlessly.
 
 ### 7. Native Container Optimization and Dataset Schema Flattening
 While attempting to `ray job submit` a custom `setup_nemo_rl.sh` wrapper, we discovered the payload was redundant. The `nvcr.io/nvidia/nemo-rl:v0.5.0` container naturally embeds a pre-compiled version of the entire framework at `/opt/nemo-rl` running on a native `/opt/nemo_rl_venv` environment!
 * **The Refactor:** We completely deleted `setup_nemo_rl.sh`. The `launch_grpo.sh` script now simply beams the configuration YAMLs into `/workspace` and triggers `/opt/nemo_rl_venv/bin/python` securely using the native container assets.
 * **The Schema Trap:** Using the natively embedded `v0.5.0` pipeline introduced a mismatch with our locally-checked-out `main` branch configs. The job instantly crashed with `KeyError: 'prompt_file'` and `KeyError: 'dataset_name'`. 
-* **Resolution:** The `nemo-rl:v0.5.0` engine expects dataset fields flattened directly at the root of the `data:` dictionary block, differing from `main` which nests them under `default:` and `train:`. We flattened `grpo_math_1b.yaml` to match the exact schema explicitly required by the active v0.5.0 trainer.
+* **Resolution:** The `nemo-rl:v0.5.0` engine expects dataset fields flattened directly at the root of the `data:` dictionary block, differing from `main` which nests them under `default:` and `train:`. We flattened `manifests/02_Job/grpo_math_1b.yaml` to match the exact schema explicitly required by the active v0.5.0 trainer.
 
 ### 8. The Eviction Nightmare: Mitigating HuggingFace & GCS-Fuse Storage Exhaustion
 The job successfully dispatched from the Ray Head, but moments later the Head Pod mysteriously evaporated from the cluster (`Error from server (NotFound)`).
@@ -99,7 +99,7 @@ The job successfully dispatched from the Ray Head, but moments later the Head Po
 * **The Root Cause:** While `HF_HOME` correctly redirected the HuggingFace cache traffic to the `/data` mount, the underlying GKE GCS-Fuse CSI driver internally provisions an `emptyDir` cache volume (`gcsfuse-cache`) natively bounded to the pod's `9Gi` ephemeral storage limit. Because the `file-cache:enable-parallel-downloads:true` flag was active, the sidecar aggressively downloaded the giant Parquet chunks into the local 9Gi disk pool before handing them to HuggingFace, triggering the instant node-level eviction.
 * **The Resolution:** 
     1. We stripped the aggressive `file-cache` flags from the manifest's `mountOptions`. 
-  2. Crucially, we injected `gke-gcsfuse/ephemeral-storage-limit: "30Gi"` directly into the `headGroupSpec` template annotations in `ray-cluster-b200-nemo.yaml`. This explicitly overrides KubeRay's default `0` fallback behavior, actively reserving an allocated 30Gi volume strictly for the sidecar without breaking the rigid spot constraints of the `default-pool` nodes (which failed scheduling at a 50Gi request). The dataset processing flawlessly scales to completion.
+  2. Crucially, we injected `gke-gcsfuse/ephemeral-storage-limit: "30Gi"` directly into the `headGroupSpec` template annotations in `manifests/01_Infra/ray-cluster-b200-nemo.yaml`. This explicitly overrides KubeRay's default `0` fallback behavior, actively reserving an allocated 30Gi volume strictly for the sidecar without breaking the rigid spot constraints of the `default-pool` nodes (which failed scheduling at a 50Gi request). The dataset processing flawlessly scales to completion.
 
 ### 9. The FlashInfer Block Size Bug: Gemma 3 Initialization
 During the initial successful launch of the Gemma 3 GRPO training job, the `vllmWorker` actors crashed during engine initialization with the following error:
@@ -119,3 +119,31 @@ During the initial successful launch of the Gemma 3 GRPO training job, the `vllm
         block_size: 32
   ```
   This successfully bypassed the FlashInfer assertion, allowed the TRTLLM compilation to proceed, and stabilized the generation loop.
+
+### 10. The Native HuggingFace Consolidation Bug (FSDP Safetensors & PR #1023)
+When training with PyTorch FSDP2 in NeMo-RL using `model_save_format: "safetensors"`, the framework attempts to dynamically write HuggingFace-compatible tensors.
+* **The Problem:** The resulting `.safetensors` files from the cluster are structurally corrupted. When vLLM or standard `transformers` APIs attempt to load them, they crash with an `AssertionError` regarding mismatched embedding tensors (e.g., loaded weight shape `[32768, 2048]` vs expected vocabulary `org_vocab_size` `262144`).
+* **The Root Cause:** We analyzed **PR #1023** (`Implement automodel_checkpoint adapter`) which introduced the `save_consolidated=True` configuration flag. The PR merely wired the flag into the underlying `nemo_automodel` submodule. The true bug resides upstream inside `nemo_automodel`'s `_consolidate_safetensors_files` function. When `save_consolidated=True` is triggered, the framework *fails to mathematically concatenate the sharded arrays*. It simply streams the raw, fragmented TP/FSDP partitions directly into new HuggingFace safetensor files and builds a `.hf_metadata` index claiming these un-merged shards represent the final model!
+* **The Resolution (The Workaround):** 
+  1. We completely abandoned the native `save_consolidated: true` flag and the broken `manual_consolidate_hf.py` fallback.
+  2. We configured the training job to output raw PyTorch DCP (`model_save_format: "pytorch"`, `save_consolidated: false`) to ensure data integrity during distributed flushes.
+  3. We authored `scripts/manual_merge_fsdp.py`.
+  4. This custom script loads *all* raw PyTorch DCP sharded `.safetensors` files from disk at once into CPU RAM, detects partitioned tensors by shape (e.g., `down_proj`, `embed_tokens`), and explicitly runs `torch.cat(tensors, dim=0)` to physically crush the 8 chunks back into a single unified HuggingFace shape (like `262144` vocab size) *before* saving them to disk.
+  5. Running this physical concatenation script flawlessly splices the padded GPU shards down into a single unified `model-00001-of-00001.safetensors` payload perfectly formatted for vLLM inference, scoring 45.8% Pass@1 on MATH-500 organically!
+
+### 11. Harmless PyTorch Inductor Cache Warnings (vLLM Initialization)
+When running evaluation scripts with vLLM across multiple GPUs (e.g., Tensor Parallelism 8), you will often see massive walls of traceback errors in the Ray logs during the initial "Capturing CUDA graphs" phase.
+
+**Example Log:**
+```
+(VllmGenerationWorker) _pickle.UnpicklingError: pickle data was truncated
+(VllmGenerationWorker) AttributeError: 'CompiledFxGraph' object has no attribute 'compiled_fn_runner'
+(VllmGenerationWorker) [0/0] fx graph cache unable to load compiled graph
+```
+
+**The Cause:**
+This is a known, harmless race condition in PyTorch's `torch.compile` Inductor cache mechanism. Because vLLM spawns 8 separate Ray worker processes simultaneously, all 8 workers attempt to read and write their independently compiled graph binaries into the exact same default cache directory (`/root/.cache/vllm_6/torch_compile_cache/`) at the exact same millisecond. 
+When one worker attempts to unpickle a cache file that another worker is currently halfway through writing, the truncation error occurs. 
+
+**The Verdict:**
+PyTorch gracefully catches these errors, falls back to compiling its own graph natively in memory, and moves on without issue. These exceptions can be safely ignored; they do not impact the correctness of the evaluation or the speed of inference.

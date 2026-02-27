@@ -6,7 +6,7 @@ The cluster provisions **B200** Spot instances (8 GPUs per node) and mounts a hi
 
 ## 📋 Prerequisites
 - Authenticated `kubectl` context pointing to your target GKE cluster.
-- The `ray-cluster-b200-nemo.yaml` manifest.
+- The `manifests/01_Infra/ray-cluster-b200-nemo.yaml` manifest.
 - A valid HuggingFace Access Token exported into your terminal (`export HF_TOKEN="hf_..."`) to download gated Gemma 3 weights.
 
 ## 🚀 Deployment Instructions
@@ -26,7 +26,7 @@ kubectl delete raycluster ray-cluster-b200-nemo
 The manifest defines a RayCluster Custom Resource (CRD). The KubeRay operator will intercept this and begin provisioning the Head and Worker pods.
 
 ```bash
-kubectl apply -f manifests/ray-cluster-b200-nemo.yaml
+kubectl apply -f manifests/01_Infra/ray-cluster-b200-nemo.yaml
 ```
 
 *Note: The YAML explicitly configures `replicas: 2` under `workerGroupSpecs`, requesting 16 B200 GPUs total. Adjust this value in the YAML if you need a different scale.*
@@ -181,26 +181,89 @@ echo "Cluster wiped. Safe to launch!"
 ```
 
 
-## 12. 💾 Converting FSDP Checkpoints (PyTorch DCP to HuggingFace)
+## 12. 💾 Converting FSDP Checkpoints to HuggingFace
 
-Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch natively saves the model checkpoints in **Distributed Checkpoint (DCP)** format.
+Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch distributes the model state across multiple nodes natively in **Distributed Checkpoint (DCP)** format. Before evaluating or serving these weights with standard HuggingFace APIs (like vLLM), they must be converted and merged into a unified format.
 
-### What is DCP?
-Instead of a single massive `model.safetensors` file, the DCP format shards the model weights and optimizer states into dozens of smaller `.pt` files. This allows PyTorch FSDP to asynchronously write checkpoints from all 8 GPUs simultaneously without choking the node's memory or encountering immediate lock-contention.
+### 🚫 The Trap: `save_consolidated: true`
+Do *not* use `save_consolidated: true` inside your YAML config with `model_save_format: safetensors`. A bug in the underlying `nemo_automodel` subsystem skips mathematical concatenation of FSDP embedding/projection shards, resulting in corrupted outputs and `AssertionError`s during vLLM initialization. 
 
-However, VLLM and standard HuggingFace inference pipelines cannot natively read DCP shards. You must merge them back into a unified HuggingFace model.
+**The Flawless Workflow:**
+Train natively using `model_save_format: "pytorch"` and `save_consolidated: false`. This guarantees the checkpoints flush rapidly and safely during distribution without metadata corruption.
 
-### How to Merge
-NeMo-RL ships with a native script to perform this merge on the cluster. After the training completes, run the following command directly on the Ray Head node to compile a specific `step_X` checkpoint into a `.safetensors` model ready for serving:
+Once your training halts or saves a step sequence, you have two options to merge the checkpoint for evaluation.
 
+### Option 1: Offline Physical Concatenation (Flawless & Verified)
+We authored a standalone offline script (`scripts/merge_benchmarking/manual_merge_fsdp.py`) that explicitly loads the partitioned DCP safetensors into CPU memory, identifies the sharded dimensions, and utilizes `torch.cat()` to physically crush the partitions into a unified HuggingFace `.safetensors` model.
+
+We have bundled this seamlessly into our evaluation script. You simply run:
 ```bash
-kubectl exec -it $RAY_HEAD_POD -- bash -c "python /opt/nemo-rl/examples/converters/convert_dcp_to_hf.py \
-    --config /data/nemo-rl-results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/step_100/policy/config.yaml \
-    --dcp-ckpt-path /data/nemo-rl-results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/step_100/policy/weights \
-    --hf-ckpt-path /data/nemo-rl-results/hf_merged_gemma3_step100"
+./scripts/merge_benchmarking/run_math500_eval.sh
+```
+This script will automatically:
+1. `kubectl cp` the merge script to the Ray Head Pod.
+2. Execute the physical merge and copy the metadata/config indices.
+3. Automatically copy the HF `tokenizer.model` from your cluster's GCS cache.
+4. Broadcast the unified footprint to all Worker node SSDs (avoiding GCS-Fuse `mmap` crashes).
+5. Launch the native NeMo-RL evaluation job on MATH-500.
+
+### Option 2: NeMo-RL Official Tooling (native torch_save to HF)
+If you prefer to strictly utilize the official `NVIDIA-NeMo/RL` conversion workflows without our offline patch, you must configure your checkpointing as follows:
+
+```yaml
+checkpointing:
+  model_save_format: "torch_save"  # Must use torch_save instead of safetensors
+  save_consolidated: false         # Avoids the FSDP consolidation bug
 ```
 
-## 13. 🎯 Adding Custom Reward Functions
+Once the model step saves natively in PyTorch DCP format, execute their converter:
+
+```bash
+# Example for a GRPO checkpoint at step 170
+uv run python examples/converters/convert_dcp_to_hf.py \
+    --config results/grpo/step_170/config.yaml \
+    --dcp-ckpt-path results/grpo/step_170/policy/weights/ \
+    --hf-ckpt-path results/grpo/hf
+```
+*Note: Adjust the paths according to your training output directory structure. Once the conversion is complete, override the `generation.model_name` in the evaluation script to point to the `results/grpo/hf` directory.*
+
+## 13. 📊 MATH-500 Benchmark Results
+
+We utilized our bundled evaluation script to measure the zero-shot Pass@1 accuracy against the MATH-500 dataset, explicitly comparing the vanilla `google/gemma-3-1b-it` model against our fine-tuned policy after 30 FSDP/GRPO steps. 
+
+**Vanilla Zero-Shot Baseline:**
+```bash
+export HF_TOKEN="your_hf_token" && ./scripts/merge_benchmarking/run_math500_eval.sh --vanilla-model google/gemma-3-1b-it
+```
+```text
+============================================================
+model_name='gemma-3-1b-it' dataset_name='math500'
+max_new_tokens=8192 temperature=0.0 top_p=1.0 top_k=-1 seed=42
+
+metric=pass@1 num_tests_per_prompt=1
+
+score=0.4020 (201.0/500)
+============================================================
+```
+
+**Fine-Tuned GRPO Model (Step 30):**
+```bash
+./scripts/merge_benchmarking/run_math500_eval.sh --skip-sync=false --skip-merge=false
+```
+```text
+============================================================
+model_name='hf_merged_model_eval' dataset_name='math500'
+max_new_tokens=8192 temperature=0.0 top_p=1.0 top_k=-1 seed=42
+
+metric=pass@1 num_tests_per_prompt=1
+
+score=0.4640 (232.0/500)
+============================================================
+```
+
+**Result:** A **+6.2% absolute gain** in mathematical reasoning accuracy after only a handful of GRPO training steps!
+
+## 14. 🎯 Adding Custom Reward Functions
 
 NeMo-RL is natively designed for modular reward engineering. Rather than strictly entangling rewards with the PPO/GRPO core loops, the framework executes simple Python functions mapped via YAML configs.
 
@@ -246,7 +309,7 @@ env:
 ### "Bug in FlashInfer block_size 16 head size 256 support"
 If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.
 
-To fix this, ensure your configuration YAML (e.g., `grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
+To fix this, ensure your configuration YAML (e.g., `manifests/02_Job/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
 ```yaml
   policy:
     generation:

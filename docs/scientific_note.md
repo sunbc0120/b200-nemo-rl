@@ -11,7 +11,7 @@ For the majority of RL tasks utilizing models under **~30 to 70 Billion Paramete
 2. **Speed of Execution:** vLLM has arguably the fastest generalized inference engine with PagedAttention. Handing off generation tasks to an explicitly co-located (or separately allocated) vLLM backend provides extreme rollout speed.
 3. **No 3D Topology Required:** Unlike Megatron, FSDP handles 1D sharding automatically without requiring the user to mathematically balance Pipeline Parallel (PP) and Tensor Parallel (TP) geometries across node boundaries.
 
-*In `grpo_math_1b.yaml`, `megatron_cfg.enabled` is `false` because a 1B model easily fits into VRAM when sharded via FSDP2 (`dtensor_cfg`), and the pipeline safely routes the generations via the `vllm_cfg` backend block.*
+*In `manifests/02_Job/grpo_math_1b.yaml`, `megatron_cfg.enabled` is `false` because a 1B model easily fits into VRAM when sharded via FSDP2 (`dtensor_cfg`), and the pipeline safely routes the generations via the `vllm_cfg` backend block.*
 
 ### When to Graduate to Megatron-Core
 Megatron-Core introduces extreme engineering complexity but unlocks capabilities that native PyTorch simply cannot achieve at unprecedented scales.
@@ -97,7 +97,7 @@ This is a direct result of the Reward Function design in the NeMo-RL Baseline:
 ### Why is there no `<think>` tag?
 In many popular GRPO tutorials (like DeepSeek-R1 open-source replications), engineers manually parse the reasoning output by creating a reward function that explicitly enforces XML tags (penalizing the model if it fails to use them).
 
-However, the `grpo_math_1b.yaml` baseline uses `math_verify_impl: "hf_math_verify"`. This reward model does not care at all about the formatting of the reasoning process. It simply uses advanced regex to scour the entire generation block for a final numerical conclusion (e.g., `The answer is \boxed{X}`) and checks if `X` matches the ground truth.
+However, the `manifests/02_Job/grpo_math_1b.yaml` baseline uses `math_verify_impl: "hf_math_verify"`. This reward model does not care at all about the formatting of the reasoning process. It simply uses advanced regex to scour the entire generation block for a final numerical conclusion (e.g., `The answer is \boxed{X}`) and checks if `X` matches the ground truth.
 
 Because the model is **never explicitly punished for omitting XML tags**, it learns a more "organic" reasoning process:
 1. It reads the prompt.

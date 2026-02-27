@@ -6,7 +6,7 @@ The cluster provisions **B200** Spot instances (8 GPUs per node) and mounts a hi
 
 ## 📋 Prerequisites
 - Authenticated `kubectl` context pointing to your target GKE cluster.
-- The `ray-cluster-b200-nemo.yaml` manifest.
+- The `manifests/01_Infra/ray-cluster-b200-nemo.yaml` manifest.
 - A valid HuggingFace Access Token exported into your terminal (`export HF_TOKEN="hf_..."`) to download gated Gemma 3 weights.
 
 ## 🚀 Deployment Instructions
@@ -26,7 +26,7 @@ kubectl delete raycluster ray-cluster-b200-nemo
 The manifest defines a RayCluster Custom Resource (CRD). The KubeRay operator will intercept this and begin provisioning the Head and Worker pods.
 
 ```bash
-kubectl apply -f manifests/ray-cluster-b200-nemo.yaml
+kubectl apply -f manifests/01_Infra/ray-cluster-b200-nemo.yaml
 ```
 
 *Note: The YAML explicitly configures `replicas: 2` under `workerGroupSpecs`, requesting 16 B200 GPUs total. Adjust this value in the YAML if you need a different scale.*
@@ -309,7 +309,7 @@ env:
 ### "Bug in FlashInfer block_size 16 head size 256 support"
 If your Gemma 3 training job crashes immediately during `vllmWorker` initialization with the FlashInfer assertion error, this is because Gemma 3 has a head size of 256, which breaks FlashInfer's default block size of 16.
 
-To fix this, ensure your configuration YAML (e.g., `grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
+To fix this, ensure your configuration YAML (e.g., `manifests/02_Job/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml`) explicitly defines the `block_size: 32` override specifically inside the **`vllm_kwargs`** dictionary (NOT `vllm_cfg`), as NeMo RL requires explicit kwargs passing for the vLLM engine constructor:
 ```yaml
   policy:
     generation:

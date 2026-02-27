@@ -21,8 +21,8 @@ fi
 
 # 1. Copy the custom config straight into the Head Pod's ephemeral /workspace
 echo "Transferring custom manifests to the Head Pod..."
-kubectl cp manifests/grpo_math_1b.yaml $RAY_HEAD_POD:/workspace/grpo_math_1b.yaml
-kubectl cp manifests/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml $RAY_HEAD_POD:/workspace/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml
+kubectl cp manifests/02_Job/grpo_math_1b.yaml $RAY_HEAD_POD:/workspace/grpo_math_1b.yaml
+kubectl cp manifests/02_Job/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml $RAY_HEAD_POD:/workspace/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200.yaml
 
 # 2. Use 'ray job submit' natively from INSIDE the Head Pod!
 # This leverages the completely pre-installed NeMo-RL codebase natively present at /opt/nemo-rl!

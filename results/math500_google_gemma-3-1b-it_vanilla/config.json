@@ -1,0 +1,10 @@
+{
+  "model_name": "google/gemma-3-1b-it",
+  "dataset_name": "math500",
+  "metric": "pass@k",
+  "k_value": 1,
+  "num_tests_per_prompt": 1,
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "top_k": -1
+}

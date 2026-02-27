@@ -227,7 +227,43 @@ uv run python examples/converters/convert_dcp_to_hf.py \
 ```
 *Note: Adjust the paths according to your training output directory structure. Once the conversion is complete, override the `generation.model_name` in the evaluation script to point to the `results/grpo/hf` directory.*
 
-## 13. 🎯 Adding Custom Reward Functions
+## 13. 📊 MATH-500 Benchmark Results
+
+We utilized our bundled evaluation script to measure the zero-shot Pass@1 accuracy against the MATH-500 dataset, explicitly comparing the vanilla `google/gemma-3-1b-it` model against our fine-tuned policy after 30 FSDP/GRPO steps. 
+
+**Vanilla Zero-Shot Baseline:**
+```bash
+export HF_TOKEN="your_hf_token" && ./scripts/merge_benchmarking/run_math500_eval.sh --vanilla-model google/gemma-3-1b-it
+```
+```text
+============================================================
+model_name='gemma-3-1b-it' dataset_name='math500'
+max_new_tokens=8192 temperature=0.0 top_p=1.0 top_k=-1 seed=42
+
+metric=pass@1 num_tests_per_prompt=1
+
+score=0.4020 (201.0/500)
+============================================================
+```
+
+**Fine-Tuned GRPO Model (Step 30):**
+```bash
+./scripts/merge_benchmarking/run_math500_eval.sh --skip-sync=false --skip-merge=false
+```
+```text
+============================================================
+model_name='hf_merged_model_eval' dataset_name='math500'
+max_new_tokens=8192 temperature=0.0 top_p=1.0 top_k=-1 seed=42
+
+metric=pass@1 num_tests_per_prompt=1
+
+score=0.4640 (232.0/500)
+============================================================
+```
+
+**Result:** A **+6.2% absolute gain** in mathematical reasoning accuracy after only a handful of GRPO training steps!
+
+## 14. 🎯 Adding Custom Reward Functions
 
 NeMo-RL is natively designed for modular reward engineering. Rather than strictly entangling rewards with the PPO/GRPO core loops, the framework executes simple Python functions mapped via YAML configs.
 

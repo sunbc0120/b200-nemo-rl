@@ -183,35 +183,49 @@ echo "Cluster wiped. Safe to launch!"
 
 ## 12. 💾 Converting FSDP Checkpoints to HuggingFace
 
-Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch distributes the model state across multiple nodes natively in **Distributed Checkpoint (DCP)** format.
+Because this pipeline uses Fully Sharded Data Parallel (FSDP) to train across all 8 GPUs, PyTorch distributes the model state across multiple nodes natively in **Distributed Checkpoint (DCP)** format. Before evaluating or serving these weights with standard HuggingFace APIs (like vLLM), they must be converted and merged into a unified format.
 
-### What is DCP?
-Instead of a single massive `model.safetensors` file, the DCP format typically shards the model weights and optimizer states into dozens of smaller `.pt` files. This allows PyTorch FSDP to asynchronously write checkpoints from all 8 GPUs simultaneously without choking the node's memory or encountering immediate lock-contention.
+### 🚫 The Trap: `save_consolidated: true`
+Do *not* use `save_consolidated: true` inside your YAML config with `model_save_format: safetensors`. A bug in the underlying `nemo_automodel` subsystem skips mathematical concatenation of FSDP embedding/projection shards, resulting in corrupted outputs and `AssertionError`s during vLLM initialization. 
 
-However, VLLM and standard HuggingFace inference pipelines cannot natively read these distributed shards. They must be merged back into a unified HuggingFace model.
+**The Flawless Workflow:**
+Train natively using `model_save_format: "pytorch"` and `save_consolidated: false`. This guarantees the checkpoints flush rapidly and safely during distribution without metadata corruption.
 
-**The Magic YAML Setting:** 
-In `grpo_math_1b.yaml`, we explicitly set `model_save_format: "safetensors"`. 
-Because of this flag, PyTorch FSDP intelligently skips the traditional `.distcp` DCP object format and natively uses HuggingFace `.safetensors` chunks (e.g., `shard-00001-...safetensors`) during distributed saving! **This means no intense weight-level conversion script is actually needed; everything is already in native HuggingFace format, it just needs to be copied into a single folder!**
+Once your training halts or saves a step sequence, you have two options to merge the checkpoint for evaluation.
 
-However, PyTorch hides the HuggingFace index mapping metadata inside a hidden `.hf_metadata` folder, rendering the raw checkpoint folder un-loadable by standard inference engines out-of-the-box.
+### Option 1: Offline Physical Concatenation (Flawless & Verified)
+We authored a standalone offline script (`scripts/merge_benchmarking/manual_merge_fsdp.py`) that explicitly loads the partitioned DCP safetensors into CPU memory, identifies the sharded dimensions, and utilizes `torch.cat()` to physically crush the partitions into a unified HuggingFace `.safetensors` model.
 
-### How to Merge
-We ship a lightweight native script (`scripts/merge_fsdp_to_hf.py`) that simply copies the already-formatted safetensor shards together, extracts the hidden metadata index, and copies the exact tokenizer directly from the GCS cluster cache (`HF_HOME`) without requiring any internet access or HuggingFace API tokens!
+We have bundled this seamlessly into our evaluation script. You simply run:
+```bash
+./scripts/merge_benchmarking/run_math500_eval.sh
+```
+This script will automatically:
+1. `kubectl cp` the merge script to the Ray Head Pod.
+2. Execute the physical merge and copy the metadata/config indices.
+3. Automatically copy the HF `tokenizer.model` from your cluster's GCS cache.
+4. Broadcast the unified footprint to all Worker node SSDs (avoiding GCS-Fuse `mmap` crashes).
+5. Launch the native NeMo-RL evaluation job on MATH-500.
 
-To compile a specific `step_X` checkpoint into a `.safetensors` model ready for serving, you must first copy the script to the Ray Head pod and then execute it:
+### Option 2: NeMo-RL Official Tooling (native torch_save to HF)
+If you prefer to strictly utilize the official `NVIDIA-NeMo/RL` conversion workflows without our offline patch, you must configure your checkpointing as follows:
+
+```yaml
+checkpointing:
+  model_save_format: "torch_save"  # Must use torch_save instead of safetensors
+  save_consolidated: false         # Avoids the FSDP consolidation bug
+```
+
+Once the model step saves natively in PyTorch DCP format, execute their converter:
 
 ```bash
-RAY_HEAD_POD=$(kubectl get pods -l ray.io/cluster=ray-cluster-b200-nemo -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}')
-
-# 1. Copy the local script to the remote pod
-kubectl cp scripts/merge_fsdp_to_hf.py $RAY_HEAD_POD:/tmp/merge_fsdp_to_hf.py
-
-# 2. Execute the script natively (export HF_HOME so it finds your cached tokenizer!)
-kubectl exec -it $RAY_HEAD_POD -- bash -c "export HF_HOME=/data/huggingface && python /tmp/merge_fsdp_to_hf.py \
-    --step-dir /data/nemo-rl-results/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/step_30 \
-    --output-dir /data/nemo-rl-results/hf_merged_gemma3_step30"
+# Example for a GRPO checkpoint at step 170
+uv run python examples/converters/convert_dcp_to_hf.py \
+    --config results/grpo/step_170/config.yaml \
+    --dcp-ckpt-path results/grpo/step_170/policy/weights/ \
+    --hf-ckpt-path results/grpo/hf
 ```
+*Note: Adjust the paths according to your training output directory structure. Once the conversion is complete, override the `generation.model_name` in the evaluation script to point to the `results/grpo/hf` directory.*
 
 ## 13. 🎯 Adding Custom Reward Functions
 

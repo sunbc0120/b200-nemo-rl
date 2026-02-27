@@ -119,3 +119,14 @@ During the initial successful launch of the Gemma 3 GRPO training job, the `vllm
         block_size: 32
   ```
   This successfully bypassed the FlashInfer assertion, allowed the TRTLLM compilation to proceed, and stabilized the generation loop.
+
+### 10. The Native HuggingFace Consolidation Bug (FSDP Safetensors & PR #1023)
+When training with PyTorch FSDP2 in NeMo-RL using `model_save_format: "safetensors"`, the framework attempts to dynamically write HuggingFace-compatible tensors.
+* **The Problem:** The resulting `.safetensors` files from the cluster are structurally corrupted. When vLLM or standard `transformers` APIs attempt to load them, they crash with an `AssertionError` regarding mismatched embedding tensors (e.g., loaded weight shape `[32768, 2048]` vs expected vocabulary `org_vocab_size` `262144`).
+* **The Root Cause:** We analyzed **PR #1023** (`Implement automodel_checkpoint adapter`) which introduced the `save_consolidated=True` configuration flag. The PR merely wired the flag into the underlying `nemo_automodel` submodule. The true bug resides upstream inside `nemo_automodel`'s `_consolidate_safetensors_files` function. When `save_consolidated=True` is triggered, the framework *fails to mathematically concatenate the sharded arrays*. It simply streams the raw, fragmented TP/FSDP partitions directly into new HuggingFace safetensor files and builds a `.hf_metadata` index claiming these un-merged shards represent the final model!
+* **The Resolution (The Workaround):** 
+  1. We completely abandoned the native `save_consolidated: true` flag and the broken `manual_consolidate_hf.py` fallback.
+  2. We configured the training job to output raw PyTorch DCP (`model_save_format: "pytorch"`, `save_consolidated: false`) to ensure data integrity during distributed flushes.
+  3. We authored `scripts/manual_merge_fsdp.py`.
+  4. This custom script loads *all* raw PyTorch DCP sharded `.safetensors` files from disk at once into CPU RAM, detects partitioned tensors by shape (e.g., `down_proj`, `embed_tokens`), and explicitly runs `torch.cat(tensors, dim=0)` to physically crush the 8 chunks back into a single unified HuggingFace shape (like `262144` vocab size) *before* saving them to disk.
+  5. Running this physical concatenation script flawlessly splices the padded GPU shards down into a single unified `model-00001-of-00001.safetensors` payload perfectly formatted for vLLM inference, scoring 45.8% Pass@1 on MATH-500 organically!

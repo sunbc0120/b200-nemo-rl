@@ -141,6 +141,10 @@ echo ""
 echo "============================================="
 echo "3. Submitting MATH-500 Eval Ray Job"
 echo "============================================="
+# Sanitize MODEL_NAME for the filesystem path
+SAFE_MODEL_NAME=$(echo "$MODEL_NAME" | tr '/' '_')
+SAVE_PATH="/data/nemo-rl-results/eval_outputs/math500_${SAFE_MODEL_NAME}_$(date +%Y%m%d_%H%M%S)"
+
 CMD="ray job submit --working-dir /workspace -- bash -c \"
 export HF_HOME=/data/huggingface
 if [ -n '${HF_TOKEN}' ]; then
@@ -156,9 +160,13 @@ cd /opt/nemo-rl
     generation.vllm_cfg.max_model_len=8192 \\
     data.dataset_name=math500 \\
     eval.num_tests_per_prompt=1 \\
+    eval.save_path=$SAVE_PATH \\
     cluster.num_nodes=1 \\
     cluster.gpus_per_node=8 \\
     generation.vllm_kwargs.block_size=32
+
+echo 'Evaluation complete.'
+echo 'Raw generations and results saved to: $SAVE_PATH'
 \""
 
 kubectl exec $RAY_HEAD_POD -c ray-head -- bash -c "$CMD"

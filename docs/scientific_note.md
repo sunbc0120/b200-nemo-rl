@@ -202,6 +202,12 @@ This is the specialized reinforcement learning repository. It does not train mod
 ### 3. NeMo-Run
 An MLOps and orchestration library. It has absolutely nothing to do with machine learning math. `nemo_run` is used to parse complex YAML configurations, build Docker containers, and submit distributed jobs to compute clusters (like Slurm or, in our case, Ray on Kubernetes). It acts simply as the "launcher" and configuration parser.
 
+### 4. Megatron Bridge
+A utility library specifically designed to bridge the gap between HuggingFace (`transformers`) models and **Megatron-Core**. Instead of manually writing conversion scripts for every new open-weight model, Megatron Bridge dynamically maps HuggingFace's model configuration and PyTorch weights into Megatron-Core's highly optimized 3D parallel topologies (Tensor, Pipeline, and Context Parallelism). 
+
+**Is it used by default under NeMo RL?** 
+Yes, whenever you select the Megatron backend (`generation.backend = "megatron"`) natively, NeMo RL relies on Megatron Bridge. For example, during initialization, `megatron_policy_worker.py` calls `AutoBridge.from_hf_pretrained` to automatically translate the downloaded HuggingFace checkpoint into the necessary Megatron states on the fly before training begins.
+
 ### 4. NeMo-AutoModel
 An abstraction API (similar to HuggingFace's `AutoModelForCausalLM`). Initiating distributed models across 8 GPUs with native PyTorch FSDP requires hundreds of lines of boilerplate code (setting up process groups, distributed samplers, wrapping the model layer-by-layer). `NeMo-AutoModel` hides all this complexity, automatically detecting your hardware and wrapping your HuggingFace/PyTorch weights globally in either FSDP or Megatron-Core so that NeMo-Aligner can just call `.train()`.
 
@@ -234,3 +240,78 @@ Instead of demanding one massive contiguous block, **PagedAttention breaks the K
 3.  **Zero Fragmentation Waste:** Memory waste drops to near 0%. 
 
 **The Result for RLHF:** Because memory is utilized so perfectly, vLLM can suddenly pack hundreds or thousands of simultaneous prompts onto a single GPU instead of just 4. This massively parallel generation capability is precisely what makes the aggressive iteration speeds of GRPO reinforcement learning loops mathematically possible!
+
+## NeMo RL Supported Megatron Converter Types
+
+NeMo RL's Megatron-Bridge system provides native, on-the-fly conversion from Hugging Face `.safetensors` to `Megatron-Core` internal layouts. When initializing a Megatron config (`megatron_cfg.enabled: true`), the user must specify a `converter_type` that tells the distributed initialization logic how to map the specific transformer variants (e.g., Fused SwiGLU vs standard MLP, standard attention vs MoE routing) to the hardware.
+
+As of the current NeMo RL `0.5.0` container baseline, the following primary `converter_type` classes are supported Out-Of-The-Box (OOB) via the `NeMo-AutoModel` abstractions:
+
+1. **Gemma:**
+   * `Gemma3ForCausalLM`
+   * `Gemma3ForConditionalGeneration` (For Vision-Language / Multimodal models)
+2. **Qwen:**
+   * `Qwen2ForCausalLM` (Qwen 2 / 2.5 dense models)
+   * `Qwen3NextForCausalLM` (Upcoming Qwen 3 Dense)
+   * `Qwen3MoeForCausalLM` (Upcoming Qwen 3 Mixture-of-Experts)
+3. **Llama:**
+   * `LlamaForCausalLM` (Llama 1, 2, 3, and 3.1)
+4. **Mistral:** 
+   * `Ministral3ForCausalLM`
+   * `Mistral3ForConditionalGeneration`
+5. **DeepSeek:**
+   * `DeepseekV3ForCausalLM` (DeepSeek V3 / R1)
+6. **ChatGLM:** 
+   * `Glm4MoeForCausalLM` (GLM-4 MoE architectures)
+7. **Nemotron:**
+   * `NemotronHForCausalLM` (NVIDIA's internal Nemotron architectures)
+8. **GPT:**
+   * `GptOssForCausalLM` (Open-Source GPT architectures)
+
+*Note: If `converter_type` is omitted from the Megatron config, the `AutoModel` wrapper attempts to dynamically parse the architecture from the Hugging Face `config.json` via the fallback `NeMoAutoModelForCausalLM` injection wrapper. For optimized training (ensuring accurate fusion kernel selection and parallel routing), explicitly defining the `converter_type` in the `.yaml` is strongly recommended.*
+
+## 3D Parallelism Explained: TP vs DP vs PP
+
+When configuring `megatron_cfg`, users must define the hardware topology using three distinct parallelism strategies to fit massive models across a cluster. The total number of GPUs utilized by the policy model is calculated as:
+`Total GPUs = Tensor Parallel (TP) * Pipeline Parallel (PP) * Data Parallel (DP)`
+
+### 1. Tensor Parallelism (TP)
+**What it is:** TP physically slices a single model's matrices (e.g., individual Attention Heads) across multiple GPUs. 
+**When to use it:** When a single model layer is too large to fit in one GPU's VRAM.
+**Networking Rule:** TP GPUs must be located *within the same physical node* (connected via ultra-fast NVLink). Stretching TP across standard ethernet/InfiniBand node boundaries will cripple performance due to constant synchronization overhead.
+
+### 2. Data Parallelism (DP)
+**What it is:** DP creates independent, identical *replicas* of the entire model topology to process multiple batches simultaneously. NeMo RL automatically calculates DP based on your available GPUs and your TP/PP settings.
+**When to use it:** To multiply your throughput. If `DP=2`, you have two identical model copies independently processing half of the global batch.
+
+*Example (Gemma-3-27B on an 8-GPU Node):*
+A 27B model's weights require ~54 GB. Setting `TP=4` slices the weights to ~13.5 GB per GPU, leaving ample room for optimizer states and vLLM KV Cache. Out of 8 total GPUs, NeMo calculates `DP = 8 / (TP=4 * PP=1) = 2`. The framework spawns two independent 4-GPU 27B replicas, explicitly doubling inference rollout generation speed.
+
+### 3. Pipeline Parallelism (PP)
+**What it is:** PP acts like a factory assembly line, assigning sequential chunks of the model's layers to different nodes. 
+**When to use it:** Exclusively used for frontier models (e.g., 70B, 400B) that physically cannot fit inside the aggregated VRAM of a single 8-GPU node. 
+
+*Example (Llama-3-400B Topology):*
+*   **Node 1 (8 GPUs):** Holds Layers 1-40. Uses `TP=8` internally to slice those layers across its NVLink.
+*   **Node 2 (8 GPUs):** Holds Layers 41-80. Uses `TP=8` internally.
+*   **Network Bridge:** Node 1 finishes Layer 40 and sends the resulting activations over the InfiniBand cable to Node 2 using `PP=2`. Because PP only sends data *once* per layer chunk—unlike TP which chatters constantly—it is the only viable method for bridging multi-node compute.
+
+## GCSFuse vs. Local NVMe: The Infrastructure Tradeoff
+
+When deploying massive models (e.g., 27B+ parameters) on Kubernetes clusters, engineers must decide where to physically cache the HuggingFace weights (`HF_HOME`).
+
+### The Storage Options
+1.  **Ephemeral Disk (Local Storage):** Usually limited to extremely small sizes (e.g., 9GB per pod) in managed GKE environments unless explicit Local SSDs are provisioned. Trying to download a 54GB model here instantly crashes the pod due to `DiskPressure`.
+2.  **GCSFuse (Networked Storage):** A Google Cloud Storage bucket mounted as a local directory (`/data/huggingface`). It has infinite capacity but extremely low IOPS and throughput compared to a local NVMe drive.
+
+### Does GCSFuse Slow Down Training?
+**No. It only slows down initialization and checkpointing.**
+
+1.  **The Initialization Download Penalty (Brutally Slow):** When launching a job for the very first time, the 54GB model must be downloaded from HuggingFace to the GCSFuse mount. Because FUSE intercepts every tiny chunk and translates it into an HTTP POST request over the network back to the Cloud Storage bucket (creating new files), it is exceptionally slow.
+2.  **The Subsequent Load Penalty (Fast):** Once the file exists in the bucket, reading it is simply streaming raw bytes down from Google's high-speed internal network. GCSFuse is highly optimized for fast, continuous reads. PyTorch will stream the 54GB directly from the bucket into CPU RAM in just a few minutes.
+3.  **The Training Loop (Fast):** Once PyTorch reads the weights from GCSFuse into CPU RAM, it immediately transfers them onto the **GPU VRAM** (e.g., the massive H100 / B200 HBM3e memory banks). From this point forward, the training and inference generation loops operate entirely inside the GPU's internal memory at **3+ Terabytes per second**. The model is *never* loaded "back and forth" via FUSE during the active training steps.
+4.  **The Checkpointing Penalty (Fast/Moderate):** Saving a checkpoint to GCSFuse is fundamentally faster than the initial internet download for two reasons:
+    *   **Massive Parallelism:** A 54GB model spread across 8 GPUs is split into 8 chunks of ~7GB. All 8 GPUs write their 7GB chunks to GCSFuse *at the exact same time* in parallel.
+    *   **Raw Binary Writes:** Writing a PyTorch checkpoint is a single, clean, massive binary dump (unlike assembling thousands of HTTP chunks from the internet). GCSFuse handles raw, contiguous BLOB uploads very efficiently.
+
+**Conclusion:** Utilizing GCSFuse is a mandatory tradeoff in standard cloud environments to bypass ephemeral storage limits. It necessitates significant patience during the very first internet-to-bucket download, but guarantees fast subsequent boots, fast distributed checkpoints, and absolute mathematical saturation of the GPUs during the active training loop.

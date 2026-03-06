@@ -147,3 +147,39 @@ When one worker attempts to unpickle a cache file that another worker is current
 
 **The Verdict:**
 PyTorch gracefully catches these errors, falls back to compiling its own graph natively in memory, and moves on without issue. These exceptions can be safely ignored; they do not impact the correctness of the evaluation or the speed of inference.
+
+### 12. The "Stuck" Generation Logs: Megatron KV Cache Starvation
+When launching the Gemma 3 27B model for the first time using the Megatron backend, the job successfully passed weight loading but appeared to completely "stick" with zero error messages during the first `Generating responses for batch of size 2048...` loop. `nvidia-smi` on the workers showed 0% GPU utilization.
+
+*   **The Symptoms:** The cluster workers were completely idle, but the Ray logs showed the `MegatronPolicyWorker` had already explicitly reserved a massive 127.35GB of GPU memory per node. After an hour, a hard remote `HTTPConnectionPool` network timeout severed the cluster actors, killing the job without a direct Python exception stack trace.
+*   **The Root Cause:** We had inherited the base architecture parameters from the `grpo_math_8B_megatron.yaml` configuration. Specifically, `generation_batch_size: 32` combined with `max_total_sequence_length: 16384`. While 32 generation sequences fit easily into the 8B parameter's VRAM pool, attempting to span 32 separate 16k-sequence KV caches simultaneously for the massive 27B parameter footprint inherently demands nearly 50GB of KV Cache memory per GPU.
+*   **The Deadlock:** The cluster YAML actively capped Megatron's internal buffer at `buffer_size_gb: 20`. When Megatron attempted to instantiate the generative matrices, it immediately starved for memory. This bottleneck locked the PyTorch allocator in an infinite wait-state (thus 0% GPU but high gigabyte reservation) until the native NCCL / Ray distributed timeout watchdog kicked in and brutally aborted the underlying C++ process.
+*   **The Resolution:** 
+    We actively adjusted the YAML memory ratios within `manifests/02b_megatron/grpo-gemma3-27b-it-megatron.yaml`:
+    1. Slashing `generation_batch_size: 16`.
+    2. Elevating `buffer_size_gb: 36`.
+    This firmly restricts the generative KV cache scale to ~25GB per batch while cleanly expanding the Megatron allocator boundaries to accommodate it, immediately resolving the initialization deadlock.
+
+### 13. Megatron DDP Unused Parameter Crash: The Multimodal Trap
+During the backward pass of the very first training step on Gemma 3 27B, the PyTorch training loop violently aborted with the following trace from Megatron's internal Distributed Data Parallel logic:
+`AssertionError: Communication call has not been issued for this bucket (0/40 params have grad available)`
+
+*   **The Symptoms:** The entire Ray cluster failed simultaneously, with every worker citing a failure to sync gradients within a specific 40-tensor `bucket` in the `param_and_grad_buffer`. The error explicitly states zero parameters out of 40 received backpropagated gradients.
+*   **The Root Cause:** Unlike previous pure-language models, Gemma 3 27B is natively a heavily blended **Multimodal (Vision-Language) Model**. Its architecture integrates a highly customized, enormous SigLIP vision encoder. During our GRPO mathematical reasoning pipeline, our dataset (OpenMathInstruct-2 or GSM8K) consists entirely of pure text. Because no imaging tensors are passed into the model, the vision encoder remains perfectly dormant branch. Subsequently, PyTorch never calculates gradients for this massive chunk of visual neural network parameters during the backward pass.
+*   **The Configuration Conflict:** Our base YAML imported an aggressive performance optimization: `overlap_grad_reduce: true`. Megatron's customized DDP engine aggressively latches hooking into PyTorch's autograd engine, attempting to scatter/gather gradients globally *as soon* as they mathematically resolve, skipping the wait for the entire backward pass to finish. It intrinsically assumes a dense activation pattern (every parameter gets a gradient eventually). When the vision parameters inevitably receive *no* gradients, the asynchronous reduction logic hangs indefinitely, waiting for hooks that will never fire, and then fatals when the trailing validation check enforces total synchronization.
+*   **The Resolution:**
+    We disabled the overlapping reduction strictly within `manifests/02b_megatron/grpo-gemma3-27b-it-megatron.yaml`:
+    ```yaml
+    distributed_data_parallel_config:
+      overlap_grad_reduce: false
+    ```
+    This successfully forces Megatron to fall back to a traditional, monolithic gradient sync *at the absolute end* of the entire backward pass, allowing PyTorch's native logic to seamlessly shrug off the empty visual gradients without fatally halting the entire cluster.
+
+### 14. Megatron Dynamic Inference Slicing Bug: `Target sizes vs Tensor sizes`
+During the *second* full generation loop, the cluster crashed inside `dynamic_context.py` at `add_request` with the following error:
+`RuntimeError: The expanded size of the tensor (4) must match the existing size (10) at non-singleton dimension 0.  Target sizes: [4].  Tensor sizes: [10]`
+
+*   **The Root Cause:** In `megatron_policy_worker.py`, when instantiating the Megatron `DynamicInferenceContext`, the framework requires a maximum sequence limit so it can statically define an integer array `[max_requests, max_kv_block_count]` to track which memory blocks belong to which requests.
+*   **The Bug:** The NeMo-RL codebase inadvertently supplied `self.cfg["generation"]["max_new_tokens"]` (which was 1024) instead of the actual `self.cfg["max_total_sequence_length"]` (which was 16384). 
+*   **The Consequence:** This caused Megatron to allocate an array mathematically hardcoded to hold exactly 1024 tokens worth of cache blocks (4 blocks of 256 tokens). Whenever generating a sequence (Prompt + Output) that went beyond 1024 tokens, it requested more blocks (e.g., 10 blocks) than the Python slice `[already_allocated : overall_required]` could physically bound inside the small array, directly triggering the PyTorch broadcast exception.
+*   **The Fix:** We permanently patched `scripts/megatron_job/megatron_policy_worker.py` to use `max_total_sequence_length` in both `InferenceWrapperConfig` and `DynamicInferenceContext`. The array now properly fits the full 16K context window without truncating early.

@@ -316,3 +316,19 @@ To fix this, ensure your configuration YAML (e.g., `manifests/02_Job/grpo-gemma3
       vllm_kwargs:
         block_size: 32
 ```
+
+## 15. 🛠️ Gemma-3-27B Megatron Backend Quirks (NeMo RL `v0.5.0`)
+
+When deploying the massive Gemma 3 27B parameter model using the native **Megatron-Core** sequence generator via NeMo-RL `v0.5.0`, you must apply several ad-hoc patches to bypass incompatibilities between the bleeding-edge HuggingFace model architecture and the slightly older Megatron-Core iteration.
+
+### Quirk 1: `inference_context` Model Wrapper Crash
+The native `Gemma3VLModel` enforces new vision-language initialization arguments into the generative forward pass, specifically `inference_context`. The `v0.5.0` `AbstractModelInferenceWrapper` blindly assumes all models only receive text arguments and will violently crash when attempting to build CUDA Graphs for the first inference step.
+*   **The Fix:** You must monkey patch `megatron/core/inference/model_inference_wrappers/abstract_model_inference_wrapper.py` natively on all worker nodes to wrap the `return self.model(...)` invocation in a `try... except TypeError:` block. If the `inference_context` parameter is rejected, fallback to a standard `self.model(..., runtime_gather_output=True)`.
+
+### Quirk 2: Exact Vocabulary Alignment (`262,208`)
+Megatron-Core automatically expands parameter dimensions to the nearest module of `128` to satisfy Tensor Parallel layout optimizations. When converting the `Gemma3ForCausalLM` weights, Megatron compiles a padded vocabulary buffer of `262,656`. However, the native model inherently emits an unpadded dimension of exactly `262,208`. This leads to a catastrophic memory alignment assertion error during the very first PPO generation step.
+*   **The Fix:** You cannot override this via cleanly passing `hf_config_overrides: { make_vocab_size_divisible_by: 1 }` since the pipeline defaults to its internal cached HuggingFace state string. You must edit `nemo_rl/models/policy/workers/megatron_policy_worker.py` on the cluster to actively force `model_cfg.make_vocab_size_divisible_by = 1` immediately preceding the `build_tokenizer()` initialization loop to guarantee dimensional fidelity.
+
+### Quirk 3: The `hf_transfer` Rust Downloader Timeout
+`huggingface_hub > 0.30` defaults to a highly experimental `xet-core` Rust downloader library. When dragging a 54GB footprint across the GCSFuse mount, transient network throttling triggers an immediate `tls handshake eof` assertion, refusing to natively resume the transfer.
+*   **The Fix:** Ensure your launch scripts actively downgrade the pip environment to `huggingface_hub==0.23.0` during the pre-download execution chain to force reliance on the resilient Python `requests` library. Once the footprint is mounted, restore the dependency tree to satisfy the downstream `transformers` requirements.

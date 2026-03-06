@@ -137,7 +137,24 @@ Running that will output a clean JSON block showing you the exact math problem, 
 
 To view different steps as training progresses, you can simply change `train_data_step1.jsonl` to `train_data_step60.jsonl` (or whichever step you want to inspect). *Note: Ensure you update `exp_008` to match your actual experiment run directory.*
 
-## 9. 📊 Visualizing Evaluation Progress
+## 9. 🚀 Running the Megatron-Core Detached Test (WARNING)
+If you wish to test the infrastructure automation and the `Megatron-Bridge` converter, we have bundled a standalone scaling test script for the 1B model. 
+
+This script utilizes a robust detached-orchestration pattern that runs entirely on the Ray Head node. It handles downloading the weights safely over GCSFuse (bypassing timeouts) and applying runtime monkey-patches to `PreTrainedCausalLM` proxies.
+
+```bash
+# Ensure your token is exported locally!
+export HF_TOKEN="your_huggingface_token"
+
+# Launch the detached 1B scaling test
+./scripts/megatron_job/launch_megatron_1b.sh
+```
+
+**⚠️ EXPECTED RESULT (TOKEN SALAD):**
+While the infrastructure, cluster parallelization, and PyTorch DDP will successfully initialize, the final text generation from the model will be **corrupted gibberish** (e.g., `Pach مذہبی leyenda INDUST<unused1166>...`). 
+This is because NeMo-RL's `Megatron-Bridge` natively scrambles the attention matrix dimensions for the novel Gemma 3 architecture during the parameter conversion phase. See `docs/megatron_gemma3.md` for a full breakdown of this dead-end.
+
+## 10. 📊 Visualizing Evaluation Progress
 
 During each evaluation phase, the model is tested on its mathematical reasoning capabilities. The following table showcases the model's trajectory across different training steps, highlighting how its `<think>` process evolves over time:
 
@@ -332,3 +349,9 @@ Megatron-Core automatically expands parameter dimensions to the nearest module o
 ### Quirk 3: The `hf_transfer` Rust Downloader Timeout
 `huggingface_hub > 0.30` defaults to a highly experimental `xet-core` Rust downloader library. When dragging a 54GB footprint across the GCSFuse mount, transient network throttling triggers an immediate `tls handshake eof` assertion, refusing to natively resume the transfer.
 *   **The Fix:** Ensure your launch scripts actively downgrade the pip environment to `huggingface_hub==0.23.0` during the pre-download execution chain to force reliance on the resilient Python `requests` library. Once the footprint is mounted, restore the dependency tree to satisfy the downstream `transformers` requirements.
+
+### Quirk 4: 🚩 Native Weight Corruption (The Blocker)
+Although you can solve all the initialization orchestration bugs above to successfully deploy a native Megatron worker pool, **do not use Megatron-Core for Gemma 3**. 
+*   **The Problem:** The native NeMo `Megatron-Bridge` parameter converter fundamentally corrupts the model weights during the Hugging Face -> Megatron dictionary translation step. Because Gemma 3 uses a novel multi-modal interleaved architecture, the attention matrix sharding and vocabulary padding indices (`262208` vs `262656`) do not slice correctly in Megatron. 
+*   **The Symptom:** Out-of-the-box, unfrozen models will instantly emit random "token salad" hallucination characters (e.g., `Pach مذہبی leyenda INDUST<unused1166>...`).
+*   **The Fix:** You must pivot your training architecture away from Megatron and back to native `vLLM` generation paired with **PyTorch LoRA** (Parameter-Efficient Fine-Tuning) to compress the PyTorch Adam optimizer footprint and avert the OOM deadlocks.

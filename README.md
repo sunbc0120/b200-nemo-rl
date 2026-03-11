@@ -130,7 +130,7 @@ You can view the raw generated strings and exactly how the LLM reasoned its answ
 ```bash
 RAY_HEAD_POD=$(kubectl get pods -l ray.io/cluster=ray-cluster-b200-nemo -l ray.io/node-type=head -o 'jsonpath={.items[0].metadata.name}')
 
-kubectl exec -it $RAY_HEAD_POD -- bash -c "tail -n 1 /opt/nemo-rl/logs/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/exp_008/train_data_step1.jsonl | jq '. | {data_source, prompt: .prompts[0], generated_text: .texts[0], rewards: .rewards}'"
+kubectl exec -it $RAY_HEAD_POD -- bash -c "tail -n 1 /data/nemo-rl-logs/grpo-gemma3-1b-it-1n8g-fsdp2tp1-b200/exp_001/train_data_step1.jsonl | jq '. | {prompt: .content[0][0], generated_text: .content[0][1], rewards: .rewards}'"
 ```
 
 Running that will output a clean JSON block showing you the exact math problem, exactly what Gemma printed inside its `<reasoning>` and `<answer>` tags, and the reward score it received for that specific trajectory!

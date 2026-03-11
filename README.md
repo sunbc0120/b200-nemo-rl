@@ -1,5 +1,12 @@
 # NeMo RL Cluster Deployment Guide
 
+## ikwak@ todo:
+- Add install rayCRD instruction
+- Test with gemma3-* model
+- Test multi node b200 example
+- Test with B40 GPU node pool
+
+
 This guide details how to seamlessly deploy a Ray cluster on Google Kubernetes Engine (GKE) configured explicitly for training models like Gemma 3 using the NVIDIA NeMo-RL framework.
 
 The cluster provisions **B200** Spot instances (8 GPUs per node) and mounts a high-performance Google Cloud Storage (GCS) bucket natively using the Fuse CSI driver.

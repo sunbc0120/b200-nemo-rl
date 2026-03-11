@@ -1,0 +1,204 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-cluster-b200-nemo
+  namespace: default
+spec:
+  enableInTreeAutoscaling: true
+  autoscalerOptions:
+    idleTimeoutSeconds: 7200
+    image: rayproject/ray:2.49.2
+  rayVersion: '2.49.2' # Matches likely version in NeMo container or close to it
+  headGroupSpec:
+    rayStartParams:
+      # ulimit is handled by the container runtime automatically now
+      dashboard-host: '0.0.0.0'
+      num-cpus: '12'
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "30Gi"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: "ikwak-ray-tf"
+        restartPolicy: Never
+        terminationGracePeriodSeconds: 300
+        initContainers:
+        - name: install-ray
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"ray[default]==2.49.2\""]
+          volumeMounts:
+          - mountPath: /tmp/ray
+            name: ray-logs
+        nodeSelector:
+          cloud.google.com/gke-nodepool: "default-pool"
+        containers:
+        - name: ray-head
+          # Using NVIDIA NeMo 24.07 container as discussed
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          env:
+          - name: PYTHONPATH
+            value: "/tmp/ray/packages"
+          - name: RAY_enable_autoscaler_v2
+            value: "1"
+          - name: ORCHESTRATOR
+            value: "ray"
+          ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+          resources:
+            limits:
+              cpu: "12"
+              memory: "32G"
+              ephemeral-storage: "9Gi"
+            requests:
+              cpu: "12"
+              memory: "32G"
+              ephemeral-storage: "9Gi"
+          volumeMounts:
+            - mountPath: /tmp/ray
+              name: ray-logs
+            - name: gcs-fuse-csi-eph
+              mountPath: /data
+          command: ["/bin/bash", "-c", "export PATH=/tmp/ray/packages/bin:$PATH; eval \"$*\""]
+        volumes:
+          - name: ray-logs
+            emptyDir: {}
+          - name: gcs-fuse-csi-eph
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: ikwak-ray-tf
+                gcsfuseMetadataPrefetchOnMount: "true"
+                mountOptions: implicit-dirs,file-mode=777,dir-mode=777,file-cache:enable-parallel-downloads:true,file-cache:cache-file-for-range-read:true,file-cache:max-size-mb:-1,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1
+  workerGroupSpecs:
+  - replicas: 2 # Scaled up for distributed job testing
+    minReplicas: 1
+    maxReplicas: 4
+    groupName: gpu-group
+    rayStartParams:
+      num-cpus: '220'
+      # resources are dynamically configured via annotations or defaults
+      # "{\"accelerator_type:B200\": 8}"'
+    template:
+      metadata:
+        annotations:
+          networking.gke.io/default-interface: 'eth0'
+          networking.gke.io/interfaces: |
+            [
+              {"interfaceName":"eth0","network":"default"},
+              {"interfaceName":"eth1","network":"rdma-0"},
+              {"interfaceName":"eth2","network":"rdma-1"},
+              {"interfaceName":"eth3","network":"rdma-2"},
+              {"interfaceName":"eth4","network":"rdma-3"},
+              {"interfaceName":"eth5","network":"rdma-4"},
+              {"interfaceName":"eth6","network":"rdma-5"},
+              {"interfaceName":"eth7","network":"rdma-6"},
+              {"interfaceName":"eth8","network":"rdma-7"}
+            ]
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: "ikwak-ray-tf"
+        restartPolicy: Never
+        initContainers:
+        - name: install-ray
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          command: ["/bin/bash", "-c", "pip install -t /tmp/ray/packages \"ray[default]==2.49.2\""]
+          volumeMounts:
+          - mountPath: /tmp
+            name: ray-tmp-storage
+        nodeSelector:
+          cloud.google.com/gke-nodepool: "b200-spot-ccc"
+        tolerations:
+          - key: "cloud.google.com/compute-class"
+            operator: "Equal"
+            value: "h200-ccc"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        containers:
+        - name: ray-worker
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          env:
+           - name: PYTHONPATH
+             value: "/tmp/ray/packages"
+           - name: LD_LIBRARY_PATH
+             value: /usr/local/nvidia/lib64:/usr/local/gib/lib64
+           - name: NCCL_CROSS_NIC
+             value: "1"
+           - name: NCCL_ALGO
+             value: "Ring,Tree"
+           - name: NCCL_PROTO
+             value: "Simple"
+           - name: NCCL_MIN_NCHANNELS
+             value: "4"
+           - name: NCCL_P2P_NET_CHUNKSIZE
+             value: "524288"
+           - name: NCCL_P2P_PCI_CHUNKSIZE
+             value: "524288"
+           - name: NCCL_P2P_NVL_CHUNKSIZE
+             value: "1048576"
+           - name: NCCL_FASTRACK_NUM_FLOWS
+             value: "2"
+           - name: NCCL_BUFFSIZE
+             value: "8388608"
+           - name: NCCL_TUNER_PLUGIN
+             value: "libnccl-tuner.so"
+           - name: ORCHESTRATOR
+             value: "ray"
+           # Force vLLM V1 as per gemma3_model_quirk.md
+           - name: NRL_VLLM_USE_V1
+             value: "1"
+          command: ["/bin/bash", "-c", "export PATH=/tmp/ray/packages/bin:$PATH; source /usr/local/gib/scripts/set_nccl_env.sh && eval \"$*\""]
+          resources:
+            limits:
+              cpu: "220"
+              memory: "2800Gi"
+              nvidia.com/gpu: "8"
+              ephemeral-storage: "1000Gi"
+            requests:
+              cpu: "220"
+              memory: "2800Gi"
+              nvidia.com/gpu: "8"
+              ephemeral-storage: "1000Gi"
+          volumeMounts:
+          - name: nvidia
+            mountPath: /usr/local/nvidia
+          - name: gib
+            mountPath: /usr/local/gib
+          - name: shared-memory
+            mountPath: /dev/shm
+          - name: ray-tmp-storage
+            mountPath: /tmp
+          - name: gcs-fuse-csi-eph
+            mountPath: /data
+        volumes:
+        - name: gib
+          hostPath:
+            path: /home/kubernetes/bin/gib
+        - name: nvidia
+          hostPath:
+            path: /home/kubernetes/bin/nvidia
+        - name: shared-memory
+          emptyDir:
+            medium: "Memory"
+            sizeLimit: 250Gi
+        - name: ray-tmp-storage
+          emptyDir: {}
+        - name: gcs-fuse-csi-eph
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: ikwak-ray-tf
+              gcsfuseMetadataPrefetchOnMount: "true"
+              mountOptions: "implicit-dirs,file-mode=777,dir-mode=777,write:enable-streaming-writes:true,read_ahead_kb=1024,file-system:kernel-list-cache-ttl-secs:-1"

@@ -1,7 +1,6 @@
 # NeMo RL Cluster Deployment Guide
 
 ## ikwak@ todo:
-- Add install rayCRD instruction
 - Test with gemma3-* model
 - Test multi node b200 example
 - Test with B40 GPU node pool
@@ -15,6 +14,8 @@ The cluster provisions **B200** Spot instances (8 GPUs per node) and mounts a hi
 - Authenticated `kubectl` context pointing to your target GKE cluster.
 - The `manifests/01_Infra/ray-cluster-b200-nemo.yaml` manifest.
 - A valid HuggingFace Access Token exported into your terminal (`export HF_TOKEN="hf_..."`) to download gated Gemma 3 weights.
+- Ray operator enabled on GKE
+- GKE set up for multi node with a3 ultra or a4 https://docs.cloud.google.com/ai-hypercomputer/docs/create/gke-ai-hypercompute-custom
 
 ## 🚀 Deployment Instructions
 
